@@ -894,7 +894,7 @@ async def custom_tts_endpoint(
     logger.debug(perf_monitor.report())
 
     # If the encoded audio is large, save to outputs directory and return a JSON download URL
-    large_file_threshold_mb = config_manager.get_int("server.large_file_threshold_mb", 50)
+    large_file_threshold_mb = config_manager.get_int("server.large_file_threshold_mb", 10)
     large_file_threshold_bytes = int(large_file_threshold_mb) * 1024 * 1024
     try:
         encoded_len = len(encoded_audio_bytes)
@@ -925,6 +925,342 @@ async def custom_tts_endpoint(
     return StreamingResponse(
         io.BytesIO(encoded_audio_bytes), media_type=media_type, headers=headers
     )
+
+
+async def _process_single_tts_request(
+    request_obj: CustomTTSRequest,
+    outputs_dir: Path,
+    timestamp_str: str,
+    force_save: bool = False,
+) -> Dict[str, Any]:
+    """
+    Core single-request processing extracted from /tts to preserve original behavior.
+    Returns a dict: { success, filename, download_url, size, error, perf_report (optional) }.
+    If force_save is True, the encoded audio is always written to outputs_dir (even if small).
+    """
+    perf_monitor = utils.PerformanceMonitor(
+        enabled=config_manager.get_bool("server.enable_performance_monitor", False)
+    )
+    perf_monitor.record("Batch-single: start")
+
+    # Resolve audio prompt path
+    audio_prompt_path_for_engine: Optional[Path] = None
+    try:
+        if request_obj.voice_mode == "predefined":
+            if not request_obj.predefined_voice_id:
+                raise ValueError("Missing 'predefined_voice_id' for 'predefined' voice mode.")
+            voices_dir = get_predefined_voices_path(ensure_absolute=True)
+            potential_path = voices_dir / request_obj.predefined_voice_id
+            if not potential_path.is_file():
+                raise FileNotFoundError(f"Predefined voice file '{request_obj.predefined_voice_id}' not found.")
+            audio_prompt_path_for_engine = potential_path
+        elif request_obj.voice_mode == "clone":
+            if not request_obj.reference_audio_filename:
+                raise ValueError("Missing 'reference_audio_filename' for 'clone' voice mode.")
+            ref_dir = get_reference_audio_path(ensure_absolute=True)
+            potential_path = ref_dir / request_obj.reference_audio_filename
+            if not potential_path.is_file():
+                raise FileNotFoundError(f"Reference audio file '{request_obj.reference_audio_filename}' not found.")
+            max_dur = config_manager.get_int("audio_output.max_reference_duration_sec", 30)
+            is_valid, msg = utils.validate_reference_audio(potential_path, max_dur)
+            if not is_valid:
+                raise ValueError(f"Invalid reference audio: {msg}")
+            audio_prompt_path_for_engine = potential_path
+
+        perf_monitor.record("Parameters and voice path resolved")
+
+        # Chunking logic (same as /tts)
+        if request_obj.split_text and len(request_obj.text) > (
+            request_obj.chunk_size * 1.5 if request_obj.chunk_size else 120 * 1.5
+        ):
+            chunk_size_to_use = request_obj.chunk_size if request_obj.chunk_size is not None else 120
+            text_chunks = utils.chunk_text_by_sentences(request_obj.text, chunk_size_to_use)
+        else:
+            text_chunks = [request_obj.text]
+
+        if not text_chunks:
+            raise ValueError("Text processing resulted in no usable chunks.")
+
+        all_audio_segments_np: List[np.ndarray] = []
+        engine_output_sample_rate: Optional[int] = None
+
+        for i, chunk in enumerate(text_chunks):
+            logger.info(f"Synthesizing chunk {i+1}/{len(text_chunks)}...")
+            perf_monitor.record(f"chunk_{i+1}_start")
+            chunk_audio_tensor, chunk_sr_from_engine = engine.synthesize(
+                text=chunk,
+                audio_prompt_path=(str(audio_prompt_path_for_engine) if audio_prompt_path_for_engine else None),
+                temperature=(request_obj.temperature if request_obj.temperature is not None else get_gen_default_temperature()),
+                exaggeration=(request_obj.exaggeration if request_obj.exaggeration is not None else get_gen_default_exaggeration()),
+                cfg_weight=(request_obj.cfg_weight if request_obj.cfg_weight is not None else get_gen_default_cfg_weight()),
+                seed=(request_obj.seed if request_obj.seed is not None else get_gen_default_seed()),
+            )
+
+            if chunk_audio_tensor is None or chunk_sr_from_engine is None:
+                raise RuntimeError(f"TTS engine failed to synthesize audio for chunk {i+1}.")
+
+            if engine_output_sample_rate is None:
+                engine_output_sample_rate = chunk_sr_from_engine
+            elif engine_output_sample_rate != chunk_sr_from_engine:
+                logger.warning(
+                    f"Inconsistent sample rate from engine: chunk {i+1} ({chunk_sr_from_engine}Hz) differs from previous ({engine_output_sample_rate}Hz). Using first chunk's SR."
+                )
+
+            current_processed_audio_tensor = chunk_audio_tensor
+
+            speed_factor_to_use = (
+                request_obj.speed_factor if request_obj.speed_factor is not None else get_gen_default_speed_factor()
+            )
+            if speed_factor_to_use != 1.0:
+                current_processed_audio_tensor, _ = utils.apply_speed_factor(
+                    current_processed_audio_tensor, chunk_sr_from_engine, speed_factor_to_use
+                )
+                perf_monitor.record(f"speed_applied_chunk_{i+1}")
+
+            processed_audio_np = current_processed_audio_tensor.cpu().numpy().squeeze()
+            all_audio_segments_np.append(processed_audio_np)
+            perf_monitor.record(f"chunk_{i+1}_done")
+
+        if not all_audio_segments_np:
+            raise RuntimeError("No audio segments were successfully generated.")
+
+        if engine_output_sample_rate is None:
+            raise RuntimeError("Engine output sample rate could not be determined.")
+
+        # Concatenate & global processing (same as /tts)
+        final_audio_np = (
+            np.concatenate(all_audio_segments_np) if len(all_audio_segments_np) > 1 else all_audio_segments_np[0]
+        )
+
+        if config_manager.get_bool("audio_processing.enable_silence_trimming", False):
+            final_audio_np = utils.trim_lead_trail_silence(final_audio_np, engine_output_sample_rate)
+            perf_monitor.record("Global silence trim applied")
+
+        if config_manager.get_bool("audio_processing.enable_internal_silence_fix", False):
+            final_audio_np = utils.fix_internal_silence(final_audio_np, engine_output_sample_rate)
+            perf_monitor.record("Global internal silence fix applied")
+
+        if config_manager.get_bool("audio_processing.enable_unvoiced_removal", False) and utils.PARSELMOUTH_AVAILABLE:
+            final_audio_np = utils.remove_long_unvoiced_segments(final_audio_np, engine_output_sample_rate)
+            perf_monitor.record("Global unvoiced removal applied")
+
+        # Encode
+        output_format_str = request_obj.output_format if request_obj.output_format else get_audio_output_format()
+        encoded_audio_bytes = utils.encode_audio(
+            audio_array=final_audio_np,
+            sample_rate=engine_output_sample_rate,
+            output_format=output_format_str,
+            target_sample_rate=get_audio_sample_rate(),
+        )
+
+        if encoded_audio_bytes is None or len(encoded_audio_bytes) < 16:
+            raise RuntimeError(f"Failed to encode final audio to {output_format_str} or output too small.")
+
+        # Decide save behavior
+        suggested_filename_base = f"tts_output_{timestamp_str}_{uuid.uuid4().hex[:8]}"
+        download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
+        out_path = outputs_dir / download_filename
+
+        encoded_len = len(encoded_audio_bytes)
+        large_file_threshold_mb = config_manager.get_int("server.large_file_threshold_mb", 10)
+        large_file_threshold_bytes = int(large_file_threshold_mb) * 1024 * 1024
+
+        # Save if forced or if over threshold
+        if force_save or encoded_len >= large_file_threshold_bytes:
+            outputs_dir.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "wb") as f_out:
+                f_out.write(encoded_audio_bytes)
+            logger.info(f"Saved generated audio to outputs: {out_path} ({encoded_len} bytes)")
+
+            result = {
+                "success": True,
+                "filename": download_filename,
+                "download_url": f"/outputs/{download_filename}",
+                "size": encoded_len,
+                "perf_report": perf_monitor.report(),
+            }
+        else:
+            # Not forced to save: return bytes and metadata (used by /tts streaming path)
+            result = {
+                "success": True,
+                "filename": download_filename,
+                "download_url": None,
+                "size": encoded_len,
+                "bytes": encoded_audio_bytes,
+                "media_type": f"audio/{output_format_str}",
+                "headers": {"Content-Disposition": f'attachment; filename="{download_filename}"'},
+                "perf_report": perf_monitor.report(),
+            }
+
+        return result
+
+    except Exception as e_proc:
+        logger.error(f"Batch-single: processing failed: {e_proc}", exc_info=True)
+        return {"success": False, "error": str(e_proc)}
+
+# ...existing code...
+
+
+@app.post(
+    "/tts/multi",
+    tags=["TTS Generation"],
+    summary="Batch TTS: process multiple texts sequentially and save outputs (no UI playback)",
+)
+async def multi_tts_endpoint(requests: List[CustomTTSRequest]):
+    """
+    Process multiple TTS requests sequentially. Each request is synthesized,
+    encoded and saved to the outputs directory. The endpoint does NOT stream
+    audio back for playback — it only saves files and returns their paths.
+    This implementation reuses the original /tts processing behavior per item.
+    """
+    logger.info(f"Received /tts/multi request with {len(requests)} item(s).")
+
+    if not engine.MODEL_LOADED:
+        logger.error("Batch TTS failed: model not loaded.")
+        raise HTTPException(
+            status_code=503,
+            detail="TTS engine model is not currently loaded or available.",
+        )
+
+    outputs_dir = get_output_path(ensure_absolute=True)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+
+    results: List[Dict[str, Any]] = []
+    for idx, req in enumerate(requests):
+        logger.info(f"Batch item {idx+1}/{len(requests)}: starting")
+        item_res = await _process_single_tts_request(req, outputs_dir, timestamp_str, force_save=True)
+        # Normalize response for UI: ensure keys exist
+        normalized = {
+            "index": idx,
+            "success": bool(item_res.get("success", False)),
+            "filename": item_res.get("filename"),
+            "download_url": item_res.get("download_url"),
+            "size": item_res.get("size", 0),
+            "error": item_res.get("error"),
+            "perf_report": item_res.get("perf_report"),
+        }
+        results.append(normalized)
+        logger.info(f"Batch item {idx+1} completed: success={normalized['success']} filename={normalized['filename']}")
+
+    return JSONResponse(content={"items": results})
+
+# @app.post(
+#     "/tts/multi",
+#     tags=["TTS Generation"],
+#     summary="Batch TTS: process multiple texts sequentially and save outputs (no UI playback)",
+# )
+# async def multi_tts_endpoint(requests: List[CustomTTSRequest]):
+#     """
+#     Process multiple TTS requests sequentially. Each request is synthesized,
+#     encoded and saved to the outputs directory. The endpoint does NOT stream
+#     audio back for playback — it only saves files and returns their paths.
+#     """
+#     logger.info(f"Received /tts/multi request with {len(requests)} item(s).")
+
+#     if not engine.MODEL_LOADED:
+#         logger.error("Batch TTS failed: model not loaded.")
+#         raise HTTPException(
+#             status_code=503,
+#             detail="TTS engine model is not currently loaded or available.",
+#         )
+
+#     outputs_dir = get_output_path(ensure_absolute=True)
+#     outputs_dir.mkdir(parents=True, exist_ok=True)
+
+#     timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+#     results = []
+
+#     for idx, req in enumerate(requests):
+#         item_result = {"index": idx, "success": False, "filename": None, "download_url": None, "size": 0, "error": None}
+#         logger.info(f"Batch item {idx+1}/{len(requests)}: processing text (first 80 chars): '{(req.text or '')[:80]}...'")
+#         try:
+#             # Resolve audio prompt path for this request (predefined or clone)
+#             audio_prompt_path_for_engine: Optional[str] = None
+#             if req.voice_mode == "predefined":
+#                 if not req.predefined_voice_id:
+#                     raise ValueError("Missing 'predefined_voice_id' for 'predefined' voice mode.")
+#                 voices_dir = get_predefined_voices_path(ensure_absolute=True)
+#                 potential_path = voices_dir / req.predefined_voice_id
+#                 if not potential_path.is_file():
+#                     raise FileNotFoundError(f"Predefined voice file '{req.predefined_voice_id}' not found.")
+#                 audio_prompt_path_for_engine = str(potential_path)
+#             elif req.voice_mode == "clone":
+#                 if not req.reference_audio_filename:
+#                     raise ValueError("Missing 'reference_audio_filename' for 'clone' voice mode.")
+#                 ref_dir = get_reference_audio_path(ensure_absolute=True)
+#                 potential_path = ref_dir / req.reference_audio_filename
+#                 if not potential_path.is_file():
+#                     raise FileNotFoundError(f"Reference audio file '{req.reference_audio_filename}' not found.")
+#                 max_dur = config_manager.get_int("audio_output.max_reference_duration_sec", 30)
+#                 is_valid, msg = utils.validate_reference_audio(potential_path, max_dur)
+#                 if not is_valid:
+#                     raise ValueError(f"Invalid reference audio: {msg}")
+#                 audio_prompt_path_for_engine = str(potential_path)
+#             # else: voice_mode may be custom/default -> leave audio_prompt_path_for_engine = None
+
+#             # Synthesize
+#             audio_tensor, sr = engine.synthesize(
+#                 text=req.text,
+#                 audio_prompt_path=audio_prompt_path_for_engine,
+#                 temperature=(req.temperature if req.temperature is not None else get_gen_default_temperature()),
+#                 exaggeration=(req.exaggeration if req.exaggeration is not None else get_gen_default_exaggeration()),
+#                 cfg_weight=(req.cfg_weight if req.cfg_weight is not None else get_gen_default_cfg_weight()),
+#                 seed=(req.seed if req.seed is not None else get_gen_default_seed()),
+#             )
+
+#             if audio_tensor is None or sr is None:
+#                 raise RuntimeError("TTS engine returned no audio for this item.")
+
+#             # Apply speed factor if provided
+#             speed_factor_to_use = req.speed_factor if getattr(req, "speed_factor", None) is not None else get_gen_default_speed_factor()
+#             if speed_factor_to_use != 1.0:
+#                 audio_tensor, _ = utils.apply_speed_factor(audio_tensor, sr, speed_factor_to_use)
+
+#             # Convert to numpy 1D
+#             audio_np = audio_tensor.cpu().numpy()
+#             if audio_np.ndim == 2:
+#                 audio_np = audio_np.squeeze()
+
+#             out_format = req.output_format if getattr(req, "output_format", None) else get_audio_output_format()
+#             # Encode (returns bytes) using utils.encode_audio
+#             encoded = utils.encode_audio(
+#                 audio_array=audio_np,
+#                 sample_rate=sr,
+#                 output_format=out_format,
+#                 target_sample_rate=get_audio_sample_rate(),
+#             )
+
+#             if not encoded or len(encoded) < 16:
+#                 raise RuntimeError("Encoded audio is empty or too small.")
+
+#             # Save to outputs directory with disambiguated filename
+#             suggested_base = f"tts_batch_{timestamp_str}_{idx+1}"
+#             ext = out_format
+#             filename = utils.sanitize_filename(f"{suggested_base}.{ext}")
+#             out_path = outputs_dir / filename
+#             with open(out_path, "wb") as f_out:
+#                 f_out.write(encoded)
+
+#             item_result.update({
+#                 "success": True,
+#                 "filename": filename,
+#                 "download_url": f"/outputs/{filename}",
+#                 "size": len(encoded),
+#             })
+#             logger.info(f"Batch item {idx+1} saved: {out_path} ({len(encoded)} bytes)")
+
+#         except Exception as e_item:
+#             err = str(e_item)
+#             logger.error(f"Error processing batch item {idx+1}: {err}", exc_info=True)
+#             item_result["error"] = err
+
+#         results.append(item_result)
+
+#     # Return the list of results (UI can read filenames and offer downloads or list)
+#     return JSONResponse(content={"items": results})
+
+# # ...existing code...
 
 
 @app.post("/v1/audio/speech", tags=["OpenAI Compatible"])

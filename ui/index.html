@@ -6,7 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chatterbox TTS Server</title>
 
-    <!--
+    <link rel="icon" href="data:;base64,=">
+    
+     <!--
       Local and third-party assets.
       - styles.css: Pre-compiled stylesheet containing all Tailwind and custom component styles.
       - wavesurfer.min.js: The WaveSurfer.js library for audio visualization, served locally.
@@ -61,7 +63,9 @@
                         <div class="p-6 sm:p-8">
                             <h2 id="tts-form-header" class="card-header">Generate Speech</h2>
 
-                            <div class="mb-5">
+
+
+                            <!-- <div class="mb-5">
                                 <label for="text" class="label-base">Text to synthesize</label>
                                 <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">
                                     Enter the text you want to convert to speech. For audiobooks, you can paste long
@@ -74,7 +78,63 @@
                                         <span id="char-count">0</span> Characters
                                     </div>
                                 </div>
+                            </div> -->
+
+                            <!-- ...existing code... -->
+                            <!-- <div class="mb-5">
+                                <label for="text" class="label-base">Text to synthesize</label>
+                                <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                    Enter the text you want to convert to speech. For audiobooks, you can paste long chapters.
+                                </p>
+
+                                <div class="mb-2 text-sm text-slate-500 dark:text-slate-400">Multiple input boxes (batch mode). Fill one or more boxes and click "Generate Speech".</div>
+                                <div id="multi-texts-container" class="space-y-4">
+                                    <div class="multi-text-box card-base p-3">
+                                        <textarea class="multi-text-item textarea-base" rows="6" placeholder="Text input 1"></textarea>
+                                    </div>
+                                    <div class="multi-text-box card-base p-3">
+                                        <textarea class="multi-text-item textarea-base" rows="6" placeholder="Text input 2"></textarea>
+                                    </div>
+                                    <div class="multi-text-box card-base p-3">
+                                        <textarea class="multi-text-item textarea-base" rows="6" placeholder="Text input 3"></textarea>
+                                    </div>
+                                    <div class="multi-text-box card-base p-3">
+                                        <textarea class="multi-text-item textarea-base" rows="6" placeholder="Text input 4"></textarea>
+                                    </div>
+                                </div>
+                            </div> -->
+                            <!-- ...existing code... -->
+
+                            <!-- ...existing code... -->
+                            <div class="mb-5">
+                            <label for="text" class="label-base">Text to synthesize</label>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                Enter the text you want to convert to speech. For audiobooks, you can paste long chapters.
+                            </p>
+
+                            <div class="flex items-center gap-4 mb-3">
+                                <label class="flex items-center text-sm label-base select-none">
+                                <input type="checkbox" id="multi-run-toggle" class="mr-2 h-4 w-4">
+                                Enable Multi-run (batch)
+                                </label>
+                                <button type="button" id="add-text-btn" class="btn-secondary" title="Add another text box">Add Text</button>
                             </div>
+
+                            <!-- Single textarea wrapper (kept for compatibility and saved-state) -->
+                            <div id="single-text-wrapper" class="relative">
+                                <textarea name="text" id="text" rows="8" class="textarea-base" placeholder="Enter text here..."></textarea>
+                                <div class="absolute bottom-2.5 right-3 text-xs text-slate-500 dark:text-slate-400">
+                                <span id="char-count">0</span> Characters
+                                </div>
+                            </div>
+
+                            <!-- Multi text container (initially hidden) -->
+                            <div id="multi-texts-container" class="space-y-4 hidden">
+                                <!-- JS will add .multi-text-item boxes; keep four seeded boxes optional -->
+                            </div>
+                            </div>
+                            <!-- ...existing code... -->
+
 
                             <div class="flex flex-wrap items-center gap-x-6 gap-y-4 mb-6">
                                 <button type="button" id="generate-btn" class="btn-primary">

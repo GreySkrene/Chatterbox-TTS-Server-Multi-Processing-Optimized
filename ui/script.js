@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     let hideChunkWarning = false;
     let hideGenerationWarning = false;
     let currentVoiceMode = 'predefined';
+    let isUserInteraction = false; // <-- declare to avoid ReferenceError
 
     const IS_LOCAL_FILE = window.location.protocol === 'file:';
     // If you always access the server via localhost
@@ -88,6 +89,230 @@ document.addEventListener('DOMContentLoaded', async function () {
     const generationWarningModal = document.getElementById('generation-warning-modal');
     const generationWarningAcknowledgeBtn = document.getElementById('generation-warning-acknowledge');
     const hideGenerationWarningCheckbox = document.getElementById('hide-generation-warning-checkbox');
+
+
+
+
+// ...existing code...
+
+    // --- New DOM selectors for multi-run batch UI ---
+    const multiRunToggle = document.getElementById('multi-run-toggle');
+    const addTextBtn = document.getElementById('add-text-btn');
+    const multiTextsContainer = document.getElementById('multi-texts-container');
+    const singleTextWrapper = document.getElementById('single-text-wrapper');
+
+    // --- Multi-run helpers ---
+    function createMultiTextBox(initialText = '') {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'multi-text-box card-base p-3 relative';
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'remove-text-btn btn-secondary absolute right-3 top-3';
+        removeBtn.textContent = 'Remove';
+        removeBtn.onclick = () => { wrapper.remove(); };
+
+        const ta = document.createElement('textarea');
+        ta.className = 'multi-text-item textarea-base';
+        ta.rows = 5;
+        ta.value = initialText || getCurrentTextContent() || '';
+
+        wrapper.appendChild(removeBtn);
+        wrapper.appendChild(ta);
+        return wrapper;
+    }
+
+    function ensureAtLeastOneMultiBox() {
+        if (!multiTextsContainer) return;
+        if (multiTextsContainer.querySelectorAll('.multi-text-item').length === 0) {
+            // prefer current single textarea content when seeding first multi box
+            const seedText = (typeof getCurrentTextContent === 'function' ? getCurrentTextContent() : (textArea ? textArea.value : '')) || '';
+            const initial = createMultiTextBox(seedText);
+            multiTextsContainer.appendChild(initial);
+        }
+    }
+
+    function toggleMultiRunUI(enabled) {
+        if (enabled) {
+            if (singleTextWrapper) singleTextWrapper.classList.add('hidden');
+            if (multiTextsContainer) { multiTextsContainer.classList.remove('hidden'); ensureAtLeastOneMultiBox(); }
+            if (audioPlayerContainer) audioPlayerContainer.classList.add('hidden'); // hide playback
+        } else {
+            if (singleTextWrapper) singleTextWrapper.classList.remove('hidden');
+            if (multiTextsContainer) multiTextsContainer.classList.add('hidden');
+            if (audioPlayerContainer) audioPlayerContainer.classList.remove('hidden');
+        }
+    }
+
+    if (multiRunToggle) {
+        multiRunToggle.addEventListener('change', () => {
+            toggleMultiRunUI(!!multiRunToggle.checked);
+            debouncedSaveState();
+        });
+    }
+
+    if (addTextBtn) {
+        addTextBtn.addEventListener('click', () => {
+            if (!multiTextsContainer) return;
+            const box = createMultiTextBox('');
+            multiTextsContainer.appendChild(box);
+            box.querySelector('.multi-text-item').focus();
+        });
+    }
+
+    // Modify existing getTTSFormData to support single-item build but keep it unchanged for single-run
+    function buildRequestForSingleControls(textValue) {
+        const jsonData = {
+            text: textValue,
+            temperature: parseFloat(temperatureSlider.value),
+            exaggeration: parseFloat(exaggerationSlider.value),
+            cfg_weight: parseFloat(cfgWeightSlider.value),
+            speed_factor: parseFloat(speedFactorSlider.value),
+            seed: parseInt(seedInput.value, 10),
+            language: languageSelect.value,
+            voice_mode: currentVoiceMode,
+            split_text: splitTextToggle.checked,
+            chunk_size: parseInt(chunkSizeSlider.value, 10),
+            output_format: outputFormatSelect.value || 'mp3'
+        };
+        if (currentVoiceMode === 'predefined' && predefinedVoiceSelect.value !== 'none') {
+            jsonData.predefined_voice_id = predefinedVoiceSelect.value;
+        } else if (currentVoiceMode === 'clone' && cloneReferenceSelect.value !== 'none') {
+            jsonData.reference_audio_filename = cloneReferenceSelect.value;
+        }
+        return jsonData;
+    }
+
+    // Safe accessor for current single textarea content (trimmed). Returns empty string when textarea missing.
+    function getCurrentTextContent() {
+        return (textArea && typeof textArea.value === 'string') ? textArea.value.trim() : '';
+    }
+
+    // New: build batch array from multi textboxes
+    function buildMultiRequestsArray() {
+        const items = [];
+        if (!multiTextsContainer) return items;
+        const textareas = multiTextsContainer.querySelectorAll('.multi-text-item');
+        textareas.forEach(ta => {
+            const textVal = ta.value.trim();
+            if (!textVal) return; // skip empty boxes
+            items.push(buildRequestForSingleControls(textVal));
+        });
+        return items;
+    }
+
+    // New: submit multiple requests sequentially using /tts/multi
+    async function submitMultiTTSRequests() {
+        isGenerating = true;
+        showLoadingOverlay();
+        const requestsArray = buildMultiRequestsArray();
+        if (requestsArray.length === 0) {
+            showNotification("No text boxes with content found for multi-run.", "error");
+            isGenerating = false;
+            hideLoadingOverlay();
+            return;
+        }
+        try {
+            const response = await fetch(`${API_BASE_URL}/tts/multi`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestsArray)
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+                throw new Error(err.detail || 'Batch TTS request failed.');
+            }
+            const jsonResp = await response.json();
+            const items = jsonResp.items || [];
+            // Show simple result list
+            const listEl = document.createElement('div');
+            listEl.className = 'card-base p-4 mt-4';
+            let anySuccess = false;
+            items.forEach((it, idx) => {
+                const row = document.createElement('div');
+                row.className = 'text-sm mb-2';
+                if (it.success) {
+                    anySuccess = true;
+                    const url = it.download_url ? `${API_BASE_URL}${it.download_url}` : null;
+                    row.innerHTML = `Item ${idx+1}: Saved as <strong>${it.filename}</strong> ${url ? `(<a href="${url}" target="_blank">download</a>)` : ''} — ${it.size} bytes.`;
+                } else {
+                    row.innerHTML = `Item ${idx+1}: Error: <span class="text-red-600">${it.error || 'unknown'}</span>`;
+                }
+                listEl.appendChild(row);
+            });
+            // Insert below the form (replace any previous multi-result area)
+            const existing = document.getElementById('multi-run-result-area');
+            if (existing) existing.remove();
+            listEl.id = 'multi-run-result-area';
+            try {
+                // Prefer inserting right after the form so we don't rely on other containers' parent relationships
+                if (ttsForm && typeof ttsForm.insertAdjacentElement === 'function') {
+                    ttsForm.insertAdjacentElement('afterend', listEl);
+                } else if (ttsForm && ttsForm.parentNode) {
+                    // If audioPlayerContainer happens to be in the same parent, insert before it; otherwise append
+                    if (audioPlayerContainer && audioPlayerContainer.parentNode === ttsForm.parentNode) {
+                        ttsForm.parentNode.insertBefore(listEl, audioPlayerContainer);
+                    } else {
+                        ttsForm.parentNode.appendChild(listEl);
+                    }
+                } else {
+                    // Last resort: append to body to ensure it becomes visible
+                    document.body.appendChild(listEl);
+                }
+            } catch (e) {
+                console.error('Failed to insert multi-run result element, appending to body as fallback:', e);
+                document.body.appendChild(listEl);
+            }
+            showNotification(anySuccess ? 'Batch processing complete.' : 'Batch finished with errors.', anySuccess ? 'success' : 'warning', 8000);
+        } catch (error) {
+            console.error('Batch TTS error:', error);
+            showNotification(error.message || 'Batch TTS failed.', 'error', 0);
+        } finally {
+            isGenerating = false;
+            hideLoadingOverlay();
+        }
+    }
+
+    // Modify proceedWithSubmissionChecks to branch for multi-run
+    function proceedWithSubmissionChecks() {
+        const isMulti = multiRunToggle && multiRunToggle.checked;
+        if (isMulti) {
+            // basic validation: at least one non-empty box
+            const items = buildMultiRequestsArray();
+            if (items.length === 0) { showNotification("Add at least one text box with content for multi-run.", "error"); return; }
+            // Don't load audio player; call multi endpoint
+            submitMultiTTSRequests();
+            return;
+        }
+        // existing single-run flow
+        const textContent = getCurrentTextContent();
+        const isSplittingEnabled = splitTextToggle.checked;
+        const currentChunkSz = parseInt(chunkSizeSlider.value, 10);
+        const needsChunkWarn = isSplittingEnabled && textContent.length >= currentChunkSz * 1.5 &&
+            currentVoiceMode !== 'predefined' && currentVoiceMode !== 'clone' &&
+            (!seedInput || parseInt(seedInput.value, 10) === 0 || seedInput.value === '') && !hideChunkWarning;
+        if (needsChunkWarn) { showChunkWarningModal(); return; }
+        submitTTSRequest();
+    }
+
+    // On initial load ensure multi-run UI reflects saved state
+    // Called during initializeApplication -> loadInitialUiState -> attachStateSavingListeners
+    function initMultiUiFromState() {
+        const multiEnabled = currentUiState.multi_run_enabled || false;
+        if (multiRunToggle) multiRunToggle.checked = !!multiEnabled;
+        toggleMultiRunUI(!!multiEnabled);
+        ensureAtLeastOneMultiBox();
+    }
+
+    // Call initMultiUiFromState after loadInitialUiState()
+    // Insert call into initializeApplication() after loadInitialUiState() or call here if already initialized:
+    setTimeout(() => {
+        initMultiUiFromState();
+    }, 0);
+
+// ...existing code...
+
+
 
 
     // Handle voice mode selection visual feedback
@@ -606,7 +831,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     // --- TTS Generation Logic ---
     function getTTSFormData() {
         const jsonData = {
-            text: textArea.value,
+            text: getCurrentTextContent(),
             temperature: parseFloat(temperatureSlider.value),
             exaggeration: parseFloat(exaggerationSlider.value),
             cfg_weight: parseFloat(cfgWeightSlider.value),
@@ -683,7 +908,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function proceedWithSubmissionChecks() {
-        const textContent = textArea.value.trim();
+        const textContent = getCurrentTextContent();
         const isSplittingEnabled = splitTextToggle.checked;
         const currentChunkSz = parseInt(chunkSizeSlider.value, 10);
         const needsChunkWarn = isSplittingEnabled && textContent.length >= currentChunkSz * 1.5 &&
@@ -701,7 +926,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             console.log('Generate button clicked!');
             console.log('Current voice mode:', currentVoiceMode);
             console.log('Is generating:', isGenerating);
-            console.log('Text content:', textArea ? textArea.value.trim() : 'NO TEXTAREA');
+            console.log('Text content:', getCurrentTextContent() || 'NO TEXTAREA');
 
             // We still prevent default in case the button has any default browser actions.
             event.preventDefault();
@@ -710,7 +935,20 @@ document.addEventListener('DOMContentLoaded', async function () {
                 showNotification("Generation is already in progress.", "warning");
                 return;
             }
-            const textContent = textArea.value.trim();
+
+            // If the single textarea was removed from the UI, fall back to multi-text batch mode.
+            if (!textArea) {
+                const items = buildMultiRequestsArray();
+                if (items.length === 0) {
+                    showNotification("Please enter some text to generate speech.", 'error');
+                    return;
+                }
+                // Directly submit as batch. We skip the single-run warnings and validations here.
+                submitMultiTTSRequests();
+                return;
+            }
+
+            const textContent = getCurrentTextContent();
             if (!textContent) {
                 showNotification("Please enter some text to generate speech.", 'error');
                 return;
@@ -1049,6 +1287,25 @@ document.addEventListener('DOMContentLoaded', async function () {
                 predefinedVoiceRefreshButton.innerHTML = originalButtonIcon;
             }
         });
+    }
+
+    // Replace the existing Generate button element to remove any previously-attached
+    // listeners from the original single-run flow, then attach a single handler
+    // that submits the batch endpoint. This ensures the UI always uses the multi
+    // processing path (server-side will handle single-item batches too).
+    try {
+        if (generateBtn && generateBtn.parentNode) {
+            const newGenBtn = generateBtn.cloneNode(true);
+            generateBtn.parentNode.replaceChild(newGenBtn, generateBtn);
+            newGenBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                if (isGenerating) return;
+                // Submit all non-empty multi textboxes as a batch
+                submitMultiTTSRequests();
+            });
+        }
+    } catch (err) {
+        console.error('Error re-binding Generate button for batch mode:', err);
     }
 
     await fetchInitialData();
