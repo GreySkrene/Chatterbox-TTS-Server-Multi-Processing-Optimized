@@ -893,6 +893,35 @@ async def custom_tts_endpoint(
     )
     logger.debug(perf_monitor.report())
 
+    # If the encoded audio is large, save to outputs directory and return a JSON download URL
+    large_file_threshold_mb = config_manager.get_int("server.large_file_threshold_mb", 50)
+    large_file_threshold_bytes = int(large_file_threshold_mb) * 1024 * 1024
+    try:
+        encoded_len = len(encoded_audio_bytes)
+        logger.debug(
+            f"Encoded audio size: {encoded_len} bytes; large file threshold: {large_file_threshold_bytes} bytes ({large_file_threshold_mb} MB)"
+        )
+        # Trigger saving when size is greater than or equal to the threshold
+        if encoded_len >= large_file_threshold_bytes:
+            outputs_dir = get_output_path(ensure_absolute=True)
+            outputs_dir.mkdir(parents=True, exist_ok=True)
+            out_path = outputs_dir / download_filename
+            with open(out_path, "wb") as f_out:
+                f_out.write(encoded_audio_bytes)
+            logger.info(
+                f"Large generated audio saved to outputs: {out_path} ({len(encoded_audio_bytes)} bytes). Returning download URL."
+            )
+            return JSONResponse(
+                content={
+                    "download_url": f"/outputs/{download_filename}",
+                    "filename": download_filename,
+                    "size": len(encoded_audio_bytes),
+                }
+            )
+    except Exception as e_save:
+        logger.error(f"Failed to save large generated audio to outputs: {e_save}", exc_info=True)
+        # Fall back to streaming response if saving fails
+
     return StreamingResponse(
         io.BytesIO(encoded_audio_bytes), media_type=media_type, headers=headers
     )

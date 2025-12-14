@@ -641,17 +641,38 @@ document.addEventListener('DOMContentLoaded', async function () {
                 const errorResult = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }));
                 throw new Error(errorResult.detail || 'TTS generation failed.');
             }
-            const audioBlob = await response.blob();
+            // Determine response type. For large files the server will save to /outputs and return JSON with a download_url.
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
             const endTime = performance.now();
             const genTime = ((endTime - startTime) / 1000).toFixed(2);
-            const filenameFromServer = response.headers.get('Content-Disposition')?.split('filename=')[1]?.replace(/"/g, '') || 'generated_audio.wav';
-            const resultDetails = {
-                outputUrl: URL.createObjectURL(audioBlob), filename: filenameFromServer, genTime: genTime,
-                submittedVoiceMode: jsonData.voice_mode, submittedPredefinedVoice: jsonData.predefined_voice_id,
-                submittedCloneFile: jsonData.reference_audio_filename
-            };
-            initializeWaveSurfer(resultDetails.outputUrl, resultDetails);
-            showNotification('Audio generated successfully!', 'success');
+            if (contentType.includes('application/json')) {
+                const jsonResp = await response.json();
+                if (jsonResp && jsonResp.download_url) {
+                    const fileUrl = `${API_BASE_URL}${jsonResp.download_url}`;
+                    const resultDetails = {
+                        outputUrl: fileUrl,
+                        filename: jsonResp.filename || (jsonResp.download_url.split('/').pop()),
+                        genTime: genTime,
+                        submittedVoiceMode: jsonData.voice_mode,
+                        submittedPredefinedVoice: jsonData.predefined_voice_id,
+                        submittedCloneFile: jsonData.reference_audio_filename,
+                    };
+                    initializeWaveSurfer(resultDetails.outputUrl, resultDetails);
+                    showNotification(`Large audio saved to server outputs and is available: ${resultDetails.filename}`, 'info', 8000);
+                } else {
+                    throw new Error('Server returned JSON but no download URL was provided.');
+                }
+            } else {
+                const audioBlob = await response.blob();
+                const filenameFromServer = response.headers.get('Content-Disposition')?.split('filename=')[1]?.replace(/"/g, '') || 'generated_audio.wav';
+                const resultDetails = {
+                    outputUrl: URL.createObjectURL(audioBlob), filename: filenameFromServer, genTime: genTime,
+                    submittedVoiceMode: jsonData.voice_mode, submittedPredefinedVoice: jsonData.predefined_voice_id,
+                    submittedCloneFile: jsonData.reference_audio_filename
+                };
+                initializeWaveSurfer(resultDetails.outputUrl, resultDetails);
+                showNotification('Audio generated successfully!', 'success');
+            }
         } catch (error) {
             console.error('TTS Generation Error:', error);
             showNotification(error.message || 'An unknown error occurred during TTS generation.', 'error');
