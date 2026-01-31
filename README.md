@@ -782,6 +782,11 @@ Set the `CUDA_VISIBLE_DEVICES` environment variable **before** running `python s
     *   Windows PowerShell: `$env:CUDA_VISIBLE_DEVICES="6,7"; python server.py`
 
 **Note:** `CUDA_VISIBLE_DEVICES` selects GPUs; it does **not** fix OOM errors if the chosen GPU lacks sufficient memory.
+
+
+**Note:** I added multi-processing. I found 12 text boxes at 50 chapters each is a pretty good limit on terminal/browser cache capacity (crashes if you try too much at once). Also, sometimes authors have notes at the end of chapters. Unless you plan on processing those chapters one at a time, i recommend taking out those notes. not sure if it is the 1. 2. etc., or something else but i found that I get cuda out of bounds errors that ruins all the processing for the batch if i don't take those out 
+
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to open an issue to report bugs or suggest features, or submit a Pull Request for improvements.
