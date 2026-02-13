@@ -137,6 +137,10 @@ async def lifespan(app: FastAPI):
     try:
         logger.info(f"Configuration loaded. Log file at: {get_log_file_path()}")
 
+        # Reset GPU state on startup to clear any previous corruption
+        logger.info("Performing GPU state initialization...")
+        engine.reset_gpu_state()
+
         paths_to_ensure = [
             get_output_path(),
             get_reference_audio_path(),
@@ -730,77 +734,116 @@ async def custom_tts_endpoint(
             status_code=400, detail="Text processing resulted in no usable chunks."
         )
 
+    def process_chunk_with_fallback(chunk_text, chunk_index, max_retries=5, depth=0):
+        """
+        Process a chunk with basic retries on CUDA errors.
+        
+        Args:
+            chunk_text: The text to synthesize
+            chunk_index: The original chunk index (for logging)
+            max_retries: Number of retries before giving up
+            depth: Recursion depth (not used in simplified version)
+        
+        Returns:
+            Tuple of (audio_tensor, sample_rate) or (None, None) if all attempts fail
+        """
+        nonlocal engine_output_sample_rate
+        
+        logger.info(f"Processing chunk {chunk_index} (text_len={len(chunk_text)})...")
+        
+        # Try to synthesize with retries
+        for attempt in range(max_retries):
+            try:
+                chunk_audio_tensor, chunk_sr_from_engine = engine.synthesize(
+                    text=chunk_text,
+                    audio_prompt_path=(
+                        str(audio_prompt_path_for_engine)
+                        if audio_prompt_path_for_engine
+                        else None
+                    ),
+                    temperature=(
+                        request.temperature
+                        if request.temperature is not None
+                        else get_gen_default_temperature()
+                    ),
+                    exaggeration=(
+                        request.exaggeration
+                        if request.exaggeration is not None
+                        else get_gen_default_exaggeration()
+                    ),
+                    cfg_weight=(
+                        request.cfg_weight
+                        if request.cfg_weight is not None
+                        else get_gen_default_cfg_weight()
+                    ),
+                    seed=(
+                        request.seed if request.seed is not None else get_gen_default_seed()
+                    ),
+                )
+                
+                if chunk_audio_tensor is not None and chunk_sr_from_engine is not None:
+                    logger.info(f"✓ Chunk {chunk_index} synthesized successfully on attempt {attempt + 1}")
+                    if engine_output_sample_rate is None:
+                        engine_output_sample_rate = chunk_sr_from_engine
+                    return chunk_audio_tensor, chunk_sr_from_engine
+                    
+            except Exception as gen_err:
+                err_str = str(gen_err)
+                if any(keyword in err_str for keyword in ["launch timed out", "CUDA error", "device-side assert", "out of bounds"]):
+                    wait_time = 1 + (attempt * 0.5)
+                    logger.warning(
+                        f"CUDA error on chunk {chunk_index} (attempt {attempt + 1}/{max_retries}). "
+                        f"Waiting {wait_time:.1f}s... Error: {err_str[:80]}"
+                    )
+                    time.sleep(wait_time)
+                else:
+                    # Not a CUDA error, re-raise
+                    raise
+        
+        return None, None
+
+    # Process all chunks with smart fallback
     for i, chunk in enumerate(text_chunks):
-        logger.info(f"Synthesizing chunk {i+1}/{len(text_chunks)}...")
-        try:
-            chunk_audio_tensor, chunk_sr_from_engine = engine.synthesize(
-                text=chunk,
-                audio_prompt_path=(
-                    str(audio_prompt_path_for_engine)
-                    if audio_prompt_path_for_engine
-                    else None
-                ),
-                temperature=(
-                    request.temperature
-                    if request.temperature is not None
-                    else get_gen_default_temperature()
-                ),
-                exaggeration=(
-                    request.exaggeration
-                    if request.exaggeration is not None
-                    else get_gen_default_exaggeration()
-                ),
-                cfg_weight=(
-                    request.cfg_weight
-                    if request.cfg_weight is not None
-                    else get_gen_default_cfg_weight()
-                ),
-                seed=(
-                    request.seed if request.seed is not None else get_gen_default_seed()
-                ),
+        chunk_audio_tensor, chunk_sr_from_engine = process_chunk_with_fallback(chunk, i + 1)
+        
+        if chunk_audio_tensor is None or chunk_sr_from_engine is None:
+            logger.error(f"Chunk {i+1} could not be processed. Exiting batch.")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to synthesize chunk {i+1}. Check logs for details. "
+                       f"You may need to restart the server and retry."
             )
-            perf_monitor.record(f"Engine synthesized chunk {i+1}")
 
-            if chunk_audio_tensor is None or chunk_sr_from_engine is None:
-                error_detail = f"TTS engine failed to synthesize audio for chunk {i+1}."
-                logger.error(error_detail)
-                raise HTTPException(status_code=500, detail=error_detail)
+        perf_monitor.record(f"Engine synthesized chunk {i+1}")
 
-            if engine_output_sample_rate is None:
-                engine_output_sample_rate = chunk_sr_from_engine
-            elif engine_output_sample_rate != chunk_sr_from_engine:
-                logger.warning(
-                    f"Inconsistent sample rate from engine: chunk {i+1} ({chunk_sr_from_engine}Hz) "
-                    f"differs from previous ({engine_output_sample_rate}Hz). Using first chunk's SR."
-                )
-
-            current_processed_audio_tensor = chunk_audio_tensor
-
-            speed_factor_to_use = (
-                request.speed_factor
-                if request.speed_factor is not None
-                else get_gen_default_speed_factor()
+        if engine_output_sample_rate is None:
+            engine_output_sample_rate = chunk_sr_from_engine
+        elif engine_output_sample_rate != chunk_sr_from_engine:
+            logger.warning(
+                f"Inconsistent sample rate from engine: chunk {i+1} ({chunk_sr_from_engine}Hz) "
+                f"differs from previous ({engine_output_sample_rate}Hz). Using first chunk's SR."
             )
-            if speed_factor_to_use != 1.0:
-                current_processed_audio_tensor, _ = utils.apply_speed_factor(
-                    current_processed_audio_tensor,
-                    chunk_sr_from_engine,
-                    speed_factor_to_use,
-                )
-                perf_monitor.record(f"Speed factor applied to chunk {i+1}")
 
-            # ### MODIFICATION ###
-            # All other processing is REMOVED from the loop.
-            # We will process the final concatenated audio clip.
-            processed_audio_np = current_processed_audio_tensor.cpu().numpy().squeeze()
-            all_audio_segments_np.append(processed_audio_np)
+        current_processed_audio_tensor = chunk_audio_tensor
 
-        except HTTPException as http_exc:
-            raise http_exc
-        except Exception as e_chunk:
-            error_detail = f"Error processing audio chunk {i+1}: {str(e_chunk)}"
-            logger.error(error_detail, exc_info=True)
-            raise HTTPException(status_code=500, detail=error_detail)
+        speed_factor_to_use = (
+            request.speed_factor
+            if request.speed_factor is not None
+            else get_gen_default_speed_factor()
+        )
+        if speed_factor_to_use != 1.0:
+            current_processed_audio_tensor, _ = utils.apply_speed_factor(
+                current_processed_audio_tensor,
+                chunk_sr_from_engine,
+                speed_factor_to_use,
+            )
+            perf_monitor.record(f"Speed factor applied to chunk {i+1}")
+
+        # ### MODIFICATION ###
+        # All other processing is REMOVED from the loop.
+        # We will process the final concatenated audio clip.
+        processed_audio_np = current_processed_audio_tensor.cpu().numpy().squeeze()
+        all_audio_segments_np.append(processed_audio_np)
 
     if not all_audio_segments_np:
         logger.error("No audio segments were successfully generated.")
@@ -942,6 +985,20 @@ async def _process_single_tts_request(
         enabled=config_manager.get_bool("server.enable_performance_monitor", False)
     )
     perf_monitor.record("Batch-single: start")
+
+    # Sanitize text to remove problematic formatting that causes tokenizer issues (asterisks, brackets, etc.)
+    import re
+    text = request_obj.text
+    original_len = len(text)
+    text = re.sub(r'\s*\*\s*\*\s*\*.*?$', '', text, flags=re.MULTILINE)  # Remove ***
+    text = re.sub(r'\[TL[^\]]*\]', '', text)  # Remove [TL Notes: ...]
+    text = re.sub(r'[\[\]]', '', text)  # Remove all brackets
+    text = re.sub(r'\*', '', text)  # Remove asterisks
+    text = re.sub(r'_', ' ', text)  # Convert underscores to spaces
+    text = re.sub(r'[\u4e00-\u9fff]', '', text)  # Remove Chinese characters
+    if len(text) != original_len:
+        logger.info(f"Text sanitized: {original_len} -> {len(text)} chars (removed problematic formatting)")
+    request_obj.text = text
 
     # Resolve audio prompt path
     audio_prompt_path_for_engine: Optional[Path] = None

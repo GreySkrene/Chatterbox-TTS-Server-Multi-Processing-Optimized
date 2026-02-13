@@ -30,20 +30,12 @@ audio_output:
   sample_rate: 24000
   max_reference_duration_sec: 30
 ui_state:
-  last_text: 'The solar system consists of the Sun and the astronomical objects gravitationally
-    bound in orbit around it.
-
-    Mars, often called the Red Planet, is the fourth planet from the Sun. It is a
-    terrestrial planet with a thin atmosphere, having surface features reminiscent
-    both of the impact craters of the Moon and the volcanoes, valleys, deserts, and
-    polar ice caps of Earth.
-
-    '
+  last_text: hello
   last_voice_mode: predefined
   last_predefined_voice: Henry.wav
   last_reference_file: Gianna.wav
   last_seed: 3000
-  last_chunk_size: 470
+  last_chunk_size: 410
   last_split_text_enabled: true
   hide_chunk_warning: false
   hide_generation_warning: true
