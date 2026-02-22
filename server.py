@@ -659,6 +659,39 @@ async def custom_tts_endpoint(
     )
     logger.debug(f"Input text (first 100 chars): '{request.text[:100]}...'")
 
+    # Sanitize text to remove problematic Unicode characters that cause tokenizer errors
+    import re
+    text = request.text
+    # Ensure text is a string (handle bytes/None/other types safely)
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', errors='replace')
+    elif text is None:
+        text = ''
+    elif not isinstance(text, str):
+        text = str(text)
+    text = re.sub(
+    r'(?m)^\s*[-\u2010-\u2015\u2013\u2014]+\s*$',
+    '...',
+    text
+    )
+    original_len = len(text)
+    # Remove special Unicode dashes, quotes, and other problematic characters
+    text = re.sub(r'[\u2010-\u2015\u2018\u2019\u201c\u201d]', lambda m: {
+        '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2013': '-', '\u2014': '-', '\u2015': '-',
+        '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"'
+    }.get(m.group(), m.group()), text)  # Convert smart quotes and dashes to ASCII
+    text = re.sub(r'\s*\*\s*\*\s*\*.*?$', '', text, flags=re.MULTILINE)  # Remove ***
+    text = re.sub(r'\[TL[^\]]*\]', '', text)  # Remove [TL Notes: ...]
+    text = re.sub(r'[\[\]]', '', text)  # Remove all brackets
+    text = re.sub(r'\*', '', text)  # Remove asterisks
+    text = re.sub(r'_', ' ', text)  # Convert underscores to spaces
+    text = re.sub(r'[\u4e00-\u9fff]', '', text)  # Remove Chinese characters
+    # Remove leading/trailing dashes and other problematic punctuation
+    text = re.sub(r'^[\s\-\–\u2013]+', '', text)  # Remove leading dashes/spaces
+    if len(text) != original_len:
+        logger.info(f"Text sanitized: {original_len} -> {len(text)} chars (removed problematic Unicode)")
+    request.text = text
+
     audio_prompt_path_for_engine: Optional[Path] = None
     if request.voice_mode == "predefined":
         if not request.predefined_voice_id:
@@ -989,6 +1022,19 @@ async def _process_single_tts_request(
     # Sanitize text to remove problematic formatting that causes tokenizer issues (asterisks, brackets, etc.)
     import re
     text = request_obj.text
+    # Ensure text is a string (handle bytes/None/other types safely)
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', errors='replace')
+    elif text is None:
+        text = ''
+    elif not isinstance(text, str):
+        text = str(text)
+    # Also replace isolated dash-only lines in batch processing
+    text = re.sub(
+    r'(?m)^\s*[-\u2010-\u2015\u2013\u2014]+\s*$',
+    '...',
+    text
+    )
     original_len = len(text)
     text = re.sub(r'\s*\*\s*\*\s*\*.*?$', '', text, flags=re.MULTILINE)  # Remove ***
     text = re.sub(r'\[TL[^\]]*\]', '', text)  # Remove [TL Notes: ...]
