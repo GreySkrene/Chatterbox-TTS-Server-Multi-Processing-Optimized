@@ -1008,11 +1008,13 @@ async def _process_single_tts_request(
     outputs_dir: Path,
     timestamp_str: str,
     force_save: bool = False,
+    batch_item_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Core single-request processing extracted from /tts to preserve original behavior.
     Returns a dict: { success, filename, download_url, size, error, perf_report (optional) }.
     If force_save is True, the encoded audio is always written to outputs_dir (even if small).
+    batch_item_number: Optional 1-based index for batch processing (used in filename generation).
     """
     perf_monitor = utils.PerformanceMonitor(
         enabled=config_manager.get_bool("server.enable_performance_monitor", False)
@@ -1042,6 +1044,8 @@ async def _process_single_tts_request(
     text = re.sub(r'\*', '', text)  # Remove asterisks
     text = re.sub(r'_', ' ', text)  # Convert underscores to spaces
     text = re.sub(r'[\u4e00-\u9fff]', '', text)  # Remove Chinese characters
+    text = re.sub(r'…+', '...', text)  # Replace ellipses with standard dots
+    text = re.sub(r'(\d+)\.', r'\1-', text)  # Replace number followed by period with dash
     if len(text) != original_len:
         logger.info(f"Text sanitized: {original_len} -> {len(text)} chars (removed problematic formatting)")
     request_obj.text = text
@@ -1159,8 +1163,21 @@ async def _process_single_tts_request(
         if encoded_audio_bytes is None or len(encoded_audio_bytes) < 16:
             raise RuntimeError(f"Failed to encode final audio to {output_format_str} or output too small.")
 
-        # Decide save behavior
-        suggested_filename_base = f"tts_output_{timestamp_str}_{uuid.uuid4().hex[:8]}"
+        # Decide save behavior - generate filename with batch number and first 2 words from input
+        random_hex = uuid.uuid4().hex[:8]
+        
+        # Extract first 2 words from the original sanitized text
+        text_words = request_obj.text.strip().split()
+        first_two_words = '_'.join(text_words[:2]) if text_words else 'no_text'
+        # Sanitize the words to be filename-safe
+        first_two_words = utils.sanitize_filename(first_two_words)
+        
+        # Build filename with format: output_<batch_number>_<random_hex>_<first_2_words>
+        if batch_item_number is not None:
+            suggested_filename_base = f"output_{batch_item_number}_{random_hex}_{first_two_words}"
+        else:
+            suggested_filename_base = f"tts_output_{timestamp_str}_{random_hex}"
+        
         download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
         out_path = outputs_dir / download_filename
 
@@ -1232,7 +1249,7 @@ async def multi_tts_endpoint(requests: List[CustomTTSRequest]):
     results: List[Dict[str, Any]] = []
     for idx, req in enumerate(requests):
         logger.info(f"Batch item {idx+1}/{len(requests)}: starting")
-        item_res = await _process_single_tts_request(req, outputs_dir, timestamp_str, force_save=True)
+        item_res = await _process_single_tts_request(req, outputs_dir, timestamp_str, force_save=True, batch_item_number=idx+1)
         # Normalize response for UI: ensure keys exist
         normalized = {
             "index": idx,
@@ -1247,6 +1264,53 @@ async def multi_tts_endpoint(requests: List[CustomTTSRequest]):
         logger.info(f"Batch item {idx+1} completed: success={normalized['success']} filename={normalized['filename']}")
 
     return JSONResponse(content={"items": results})
+
+
+@app.post(
+    "/clear_cache",
+    tags=["Utilities"],
+    summary="Clear all cached data and debug files",
+)
+async def clear_cache_endpoint():
+    """
+    Clears all server-side cached data and debug files.
+    This includes:
+    - problematic_chunks_debug.txt (error tracking file)
+    - Engine context and cached state
+    Useful for resetting the state between batch processing runs to free up memory.
+    """
+    try:
+        logger.info("Clear cache request received.")
+        
+        # Clear debug file
+        debug_file = Path("problematic_chunks_debug.txt")
+        if debug_file.exists():
+            try:
+                debug_file.unlink()
+                logger.info("Deleted problematic_chunks_debug.txt")
+            except Exception as e:
+                logger.warning(f"Could not delete debug file: {e}")
+        
+        # Clear engine context
+        try:
+            engine._current_chunk_context = None
+            logger.info("Cleared engine chunk context")
+        except Exception as e:
+            logger.warning(f"Could not clear engine context: {e}")
+        
+        # Optionally trigger garbage collection
+        import gc
+        gc.collect()
+        logger.info("Triggered garbage collection")
+        
+        return JSONResponse(content={"success": True, "message": "Cache cleared successfully"})
+    
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear cache: {str(e)}"
+        )
 
 # @app.post(
 #     "/tts/multi",

@@ -89,6 +89,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     const generationWarningModal = document.getElementById('generation-warning-modal');
     const generationWarningAcknowledgeBtn = document.getElementById('generation-warning-acknowledge');
     const hideGenerationWarningCheckbox = document.getElementById('hide-generation-warning-checkbox');
+    const clearAllBtn = document.getElementById('clear-all-btn');
 
 
 
@@ -973,6 +974,63 @@ document.addEventListener('DOMContentLoaded', async function () {
         });
     } else {
         console.log('Generate button not found!');
+    }
+
+    // --- Clear All Handler ---
+    async function clearAllData() {
+        // Double-check with user before clearing
+        if (!confirm("Clear all text boxes and server cache? This cannot be undone.")) {
+            return;
+        }
+
+        try {
+            // Clear server-side cache
+            const response = await fetch(`${API_BASE_URL}/clear_cache`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+                const errorResult = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }));
+                throw new Error(errorResult.detail || 'Failed to clear server cache.');
+            }
+
+            // Clear client-side UI
+            // Clear single textarea
+            if (textArea) {
+                textArea.value = '';
+                if (charCount) charCount.textContent = '0';
+            }
+
+            // Clear multi-text boxes
+            if (multiTextsContainer) {
+                multiTextsContainer.innerHTML = '';
+                ensureAtLeastOneMultiBox();
+            }
+
+            // Reset character count
+            if (charCount) charCount.textContent = '0';
+
+            // Clear audio player if present
+            if (audioPlayerContainer) {
+                audioPlayerContainer.innerHTML = '';
+            }
+
+            // Save the cleared state
+            await saveCurrentUiState();
+
+            showNotification('All text boxes cleared and server cache flushed. Ready for next batch.', 'success', 5000);
+        } catch (error) {
+            console.error('Clear All Error:', error);
+            showNotification(error.message || 'Error clearing data.', 'error');
+        }
+    }
+
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', function (event) {
+            event.preventDefault();
+            clearAllData();
+        });
     }
 
     // --- Modal Handling ---
