@@ -5,7 +5,6 @@ import logging
 import random
 import numpy as np
 import torch
-import atexit
 from typing import Optional, Tuple
 from pathlib import Path
 
@@ -30,20 +29,24 @@ _last_seed_value: Optional[int] = None  # Cache to avoid redundant seed calls
 # Track the current chunk being synthesized (pre-write ensures it's captured even if process crashes)
 _current_chunk_context = None
 
+DEBUG_DIR = Path(__file__).resolve().parent / "debugging"
+DEBUG_ERROR_FILE = DEBUG_DIR / "problematic_chunks_debug.txt"
+DEBUG_LAST_ATTEMPT_FILE = DEBUG_DIR / "last_attempt.txt"
 
-def _write_debug_file(status="ERROR"):
-    """Write the current chunk context to debug file. ONLY writes if file doesn't exist (first error only)."""
+
+def _write_chunk_context(
+    debug_file_path: Path,
+    status: str,
+    error_details: Optional[str] = None,
+):
+    """Write the current synthesis context to an app-owned debug file."""
     if _current_chunk_context is None:
         return
-    debug_file = Path("problematic_chunks_debug.txt")
-    # Only write if this is the FIRST error (file doesn't exist yet)
-    if debug_file.exists():
-        logger.info("Debug file already exists, preserving first error. Skipping overwrite.")
-        return
     try:
-        with open(debug_file, "w", encoding="utf-8") as f:
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(debug_file_path, "w", encoding="utf-8") as f:
             f.write(f"{'='*80}\n")
-            f.write(f"STATUS: {status} (FIRST ERROR - NOT OVERWRITTEN)\n")
+            f.write(f"STATUS: {status}\n")
             f.write(f"TEXT LENGTH: {len(_current_chunk_context.get('text', ''))} characters\n")
             f.write(f"AUDIO_PROMPT: {_current_chunk_context.get('audio_prompt_path')}\n")
             f.write(f"TEMPERATURE: {_current_chunk_context.get('temperature')}\n")
@@ -51,17 +54,33 @@ def _write_debug_file(status="ERROR"):
             f.write(f"CFG_WEIGHT: {_current_chunk_context.get('cfg_weight')}\n")
             f.write(f"SEED: {_current_chunk_context.get('seed')}\n")
             f.write(f"TEXT CONTENT:\n{_current_chunk_context.get('text', '')}\n")
+            if error_details:
+                f.write(f"ERROR DETAILS:\n{error_details[:600]}\n")
             f.write(f"{'='*80}\n")
     except Exception as e:
         logger.warning(f"Failed to write debug file: {e}")
 
 
-def _on_exit():
-    """Called on process exit to ensure the last chunk is saved."""
-    _write_debug_file(status="PROCESS_EXIT")
+def _write_last_attempt():
+    """Record the active chunk so a hard process/GPU crash can be diagnosed."""
+    _write_chunk_context(DEBUG_LAST_ATTEMPT_FILE, "ATTEMPTING")
 
 
-atexit.register(_on_exit)
+def _write_error_debug_file(error_details: str):
+    """Record a caught synthesis error, preserving the first one when configured."""
+    preserve_first = config_manager.get_bool("debug.preserve_first_error", True)
+    if preserve_first and DEBUG_ERROR_FILE.exists():
+        logger.info("Debug error file already exists; preserving the first error.")
+        return
+    _write_chunk_context(DEBUG_ERROR_FILE, "ERROR", error_details)
+
+
+def _clear_last_attempt():
+    """Remove the transient attempt marker after synthesis returns normally."""
+    try:
+        DEBUG_LAST_ATTEMPT_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        logger.debug(f"Could not clear last-attempt debug file: {e}")
 
 
 
@@ -162,17 +181,31 @@ def _test_mps_functionality() -> bool:
 def reset_gpu_state():
     """
     Attempts to reset GPU state to clear any corruption or hung kernels.
-    This can help recover from CUDA timeout errors.
+    This can help recover from CUDA timeout or unknown device errors.
     """
     if not torch.cuda.is_available():
         return
-    
+
     try:
         logger.info("Attempting to reset GPU state...")
-        # Clear GPU cache
+
+        # Clear GPU cache and IPC handles
         torch.cuda.empty_cache()
-        # Synchronize to ensure all operations complete
+        try:
+            torch.cuda.ipc_collect()
+        except Exception as e:
+            logger.debug(f"CUDA ipc_collect not supported/failed: {e}")
+
+        # Synchronize to ensure all pending operations are complete.
         torch.cuda.synchronize()
+
+        # Reset peak memory stats for all devices (available in torch >=1.8)
+        for device_idx in range(torch.cuda.device_count()):
+            try:
+                torch.cuda.reset_peak_memory_stats(device_idx)
+            except Exception:
+                pass
+
         logger.info("GPU state reset successfully")
     except Exception as e:
         logger.warning(f"Failed to reset GPU state: {e}")
@@ -334,8 +367,7 @@ def synthesize(
         logger.error("TTS model is not loaded. Cannot synthesize audio.")
         return None, None
 
-    # Capture the chunk context and pre-write to debug file BEFORE attempting synthesis
-    # This ensures we capture the chunk even if the process crashes with a hard CUDA assert
+    # Capture the chunk before synthesis so a hard CUDA/process crash can be diagnosed.
     _current_chunk_context = {
         "text": text,
         "audio_prompt_path": audio_prompt_path,
@@ -344,7 +376,7 @@ def synthesize(
         "cfg_weight": cfg_weight,
         "seed": seed,
     }
-    _write_debug_file(status="ATTEMPTING")
+    _write_last_attempt()
 
     try:
         # Set seed globally if a specific seed value is provided and is non-zero.
@@ -375,13 +407,7 @@ def synthesize(
             err_str = str(gen_err)
             # Check for any CUDA-related error (device-side assert, timeout, out of bounds, etc.)
             if any(keyword in err_str for keyword in ["launch timed out", "CUDA error", "device-side assert", "out of bounds", "vectorized_gather"]):
-                # Update the pre-written debug file with error details
-                try:
-                    if _current_chunk_context:
-                        with open(Path("problematic_chunks_debug.txt"), "a", encoding="utf-8") as f:
-                            f.write(f"\nERROR_DETAILS:\n{err_str[:600]}\n")
-                except Exception as debug_err:
-                    logger.warning(f"Failed to append error to debug file: {debug_err}")
+                _write_error_debug_file(err_str)
                 
                 logger.warning(
                     f"CUDA error detected: {err_str[:100]}. "
@@ -400,8 +426,11 @@ def synthesize(
         # The ChatterboxTTS.generate method already returns a CPU tensor.
         return wav_tensor, chatterbox_model.sr
     except Exception as e:
+        _write_error_debug_file(str(e))
         logger.error(f"Error during TTS synthesis: {e}", exc_info=True)
         return None, None
+    finally:
+        _clear_last_attempt()
 
 
 # --- End File: engine.py ---

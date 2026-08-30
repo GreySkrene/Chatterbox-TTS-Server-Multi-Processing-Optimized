@@ -207,7 +207,8 @@ POTENTIAL_END_PATTERN = re.compile(r'([.!?])(["\']?)(\s+|$)')
 # Pattern to detect start-of-line bullet points or numbered lists.
 BULLET_POINT_PATTERN = re.compile(r"(?:^|\n)\s*([-•*]|\d+\.)\s+")
 # Placeholder for non-verbal cues or special instructions within text (e.g., (laughs), (sighs)).
-NON_VERBAL_CUE_PATTERN = re.compile(r"(\([\w\s'-]+\))")
+# Also captures angle bracket content like <UI notifications>.
+NON_VERBAL_CUE_PATTERN = re.compile(r"(\([\w\s'-]+\)|<[^>]+>)")
 
 
 # --- Audio Processing Utilities ---
@@ -1029,8 +1030,8 @@ def chunk_text_by_sentences(
 
     Args:
         full_text: The complete text to be chunked.
-        chunk_size: The desired maximum character length for each chunk.
-                    Sentences longer than this will form their own chunk.
+        chunk_size: The maximum character length for each chunk. Sentences longer
+                    than this are split at word boundaries when possible.
 
     Returns:
         A list of text chunks, ready for TTS.
@@ -1069,9 +1070,12 @@ def chunk_text_by_sentences(
         if current_chunk_length > chunk_size and len(current_chunk_sentences) == 1:
             logger.info(
                 f"A single segment (length {current_chunk_length}) exceeds chunk_size {chunk_size}. "
-                f"It will form its own chunk."
+                f"It will be split into smaller chunks."
             )
-            text_chunks.append(" ".join(current_chunk_sentences))
+            # Split the long segment into smaller pieces
+            long_segment = current_chunk_sentences[0]
+            sub_chunks = _split_long_text(long_segment, chunk_size)
+            text_chunks.extend(sub_chunks)
             current_chunk_sentences = []
             current_chunk_length = 0
 
@@ -1088,6 +1092,32 @@ def chunk_text_by_sentences(
 
     logger.info(f"Text chunking complete. Generated {len(text_chunks)} chunk(s).")
     return text_chunks
+
+
+def _split_long_text(text: str, max_length: int) -> List[str]:
+    """
+    Splits a long text into smaller chunks of at most max_length characters,
+    trying to split at word boundaries.
+    """
+    if max_length <= 0:
+        return [text] if text else []
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + max_length, len(text))
+        if end < len(text):
+            # Try to find a space to split at
+            split_pos = text.rfind(' ', start, end)
+            if split_pos > start:
+                end = split_pos
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end
+    return chunks
 
 
 # --- File System Utilities ---

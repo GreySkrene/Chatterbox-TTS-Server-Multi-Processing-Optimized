@@ -101,7 +101,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_predefined_voices_in_dropdown": 20,  # Max predefined voices to list in UI dropdown.
     },
     "debug": {  # Settings for debugging purposes
-        "save_intermediate_audio": False  # If true, save intermediate audio files for debugging
+        "save_intermediate_audio": False,  # If true, save intermediate audio files for debugging
+        "preserve_first_error": True,  # If true, preserve the first synthesis error; otherwise keep the latest
     },
 }
 

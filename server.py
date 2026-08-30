@@ -1275,21 +1275,21 @@ async def clear_cache_endpoint():
     """
     Clears all server-side cached data and debug files.
     This includes:
-    - problematic_chunks_debug.txt (error tracking file)
+    - generated files under debugging/ (error tracking files)
     - Engine context and cached state
     Useful for resetting the state between batch processing runs to free up memory.
     """
     try:
         logger.info("Clear cache request received.")
         
-        # Clear debug file
-        debug_file = Path("problematic_chunks_debug.txt")
-        if debug_file.exists():
+        # Clear generated debug files. Paths are fixed by the engine and cannot be
+        # redirected through the settings API.
+        for debug_file in (engine.DEBUG_ERROR_FILE, engine.DEBUG_LAST_ATTEMPT_FILE):
             try:
-                debug_file.unlink()
-                logger.info("Deleted problematic_chunks_debug.txt")
+                debug_file.unlink(missing_ok=True)
+                logger.info(f"Cleared debug file: {debug_file}")
             except Exception as e:
-                logger.warning(f"Could not delete debug file: {e}")
+                logger.warning(f"Could not delete debug file {debug_file}: {e}")
         
         # Clear engine context
         try:
