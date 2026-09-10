@@ -22,6 +22,7 @@ uvicorn[standard]
 # Other ML & Audio Libraries
 numpy>=1.26.0,<3.0.0  # More flexible to avoid conflicts
 soundfile  # Requires libsndfile system library
+lameenc  # Bundled streaming MP3 encoder; no FFmpeg executable required
 librosa
 safetensors
 descript-audio-codec

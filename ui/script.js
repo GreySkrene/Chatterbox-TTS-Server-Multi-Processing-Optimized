@@ -77,6 +77,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     const restartServerBtn = document.getElementById('restart-server-btn');
     const configStatus = document.getElementById('config-status');
     const resetSettingsBtn = document.getElementById('reset-settings-btn');
+    const bookRemoveNotesCheckbox = document.getElementById('book-remove-notes');
+    const bookSectionSizeInput = document.getElementById('book-section-size');
     const audioPlayerContainer = document.getElementById('audio-player-container');
     const loadingOverlay = document.getElementById('loading-overlay');
     const loadingMessage = document.getElementById('loading-message');
@@ -101,6 +103,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     const addTextBtn = document.getElementById('add-text-btn');
     const multiTextsContainer = document.getElementById('multi-texts-container');
     const singleTextWrapper = document.getElementById('single-text-wrapper');
+    const manualMultiRunInputs = document.getElementById('manual-multi-run-inputs');
+    const manualMultiRunInputCount = document.getElementById('manual-multi-run-input-count');
 
     // --- Multi-run helpers ---
     function createMultiTextBox(initialText = '') {
@@ -111,36 +115,48 @@ document.addEventListener('DOMContentLoaded', async function () {
         removeBtn.type = 'button';
         removeBtn.className = 'remove-text-btn btn-secondary absolute right-3 top-3';
         removeBtn.textContent = 'Remove';
-        removeBtn.onclick = () => { wrapper.remove(); };
+        removeBtn.onclick = () => {
+            wrapper.remove();
+            updateMultiRunInputSummary();
+        };
 
         const ta = document.createElement('textarea');
         ta.className = 'multi-text-item textarea-base';
         ta.rows = 5;
-        ta.value = initialText || getCurrentTextContent() || '';
+        ta.value = initialText || '';
 
         wrapper.appendChild(removeBtn);
         wrapper.appendChild(ta);
         return wrapper;
     }
 
-    function ensureAtLeastOneMultiBox() {
+    function resetMultiTextBoxes() {
         if (!multiTextsContainer) return;
-        if (multiTextsContainer.querySelectorAll('.multi-text-item').length === 0) {
-            // prefer current single textarea content when seeding first multi box
-            const seedText = (typeof getCurrentTextContent === 'function' ? getCurrentTextContent() : (textArea ? textArea.value : '')) || '';
-            const initial = createMultiTextBox(seedText);
-            multiTextsContainer.appendChild(initial);
-        }
+        multiTextsContainer.innerHTML = '';
+        const count = Math.max(1, parseInt(currentUiState.initial_textbox_count || 11, 10));
+        for (let i = 0; i < count; i++) multiTextsContainer.appendChild(createMultiTextBox(''));
+        updateMultiRunInputSummary();
+    }
+
+    function updateMultiRunInputSummary() {
+        if (!manualMultiRunInputCount || !multiTextsContainer) return;
+        const count = multiTextsContainer.querySelectorAll('.multi-text-item').length;
+        manualMultiRunInputCount.textContent = `Expand to edit the ${count} input ${count === 1 ? 'box' : 'boxes'}`;
+    }
+
+    function ensureAtLeastOneMultiBox() {
+        if (multiTextsContainer && multiTextsContainer.querySelectorAll('.multi-text-item').length === 0) resetMultiTextBoxes();
     }
 
     function toggleMultiRunUI(enabled) {
         if (enabled) {
             if (singleTextWrapper) singleTextWrapper.classList.add('hidden');
-            if (multiTextsContainer) { multiTextsContainer.classList.remove('hidden'); ensureAtLeastOneMultiBox(); }
+            if (manualMultiRunInputs) manualMultiRunInputs.classList.remove('hidden');
+            if (multiTextsContainer) ensureAtLeastOneMultiBox();
             if (audioPlayerContainer) audioPlayerContainer.classList.add('hidden'); // hide playback
         } else {
             if (singleTextWrapper) singleTextWrapper.classList.remove('hidden');
-            if (multiTextsContainer) multiTextsContainer.classList.add('hidden');
+            if (manualMultiRunInputs) manualMultiRunInputs.classList.add('hidden');
             if (audioPlayerContainer) audioPlayerContainer.classList.remove('hidden');
         }
     }
@@ -157,6 +173,8 @@ document.addEventListener('DOMContentLoaded', async function () {
             if (!multiTextsContainer) return;
             const box = createMultiTextBox('');
             multiTextsContainer.appendChild(box);
+            updateMultiRunInputSummary();
+            if (manualMultiRunInputs) manualMultiRunInputs.open = true;
             box.querySelector('.multi-text-item').focus();
         });
     }
@@ -299,17 +317,14 @@ document.addEventListener('DOMContentLoaded', async function () {
     // On initial load ensure multi-run UI reflects saved state
     // Called during initializeApplication -> loadInitialUiState -> attachStateSavingListeners
     function initMultiUiFromState() {
-        const multiEnabled = currentUiState.multi_run_enabled || false;
+        const multiEnabled = currentUiState.multi_run_enabled !== false;
         if (multiRunToggle) multiRunToggle.checked = !!multiEnabled;
+        resetMultiTextBoxes();
         toggleMultiRunUI(!!multiEnabled);
-        ensureAtLeastOneMultiBox();
     }
 
     // Call initMultiUiFromState after loadInitialUiState()
     // Insert call into initializeApplication() after loadInitialUiState() or call here if already initialized:
-    setTimeout(() => {
-        initMultiUiFromState();
-    }, 0);
 
 // ...existing code...
 
@@ -417,7 +432,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     // --- UI State Persistence ---
     async function saveCurrentUiState() {
         const stateToSave = {
-            last_text: textArea ? textArea.value : '',
+            multi_run_enabled: multiRunToggle ? multiRunToggle.checked : true,
+            initial_textbox_count: parseInt(currentUiState.initial_textbox_count || 11, 10),
+            chapters_per_section: parseInt(bookSectionSizeInput?.value || 50, 10),
+            keep_notes: !bookRemoveNotesCheckbox?.checked,
             last_voice_mode: currentVoiceMode,
             last_predefined_voice: predefinedVoiceSelect ? predefinedVoiceSelect.value : null,
             last_reference_file: cloneReferenceSelect ? cloneReferenceSelect.value : null,
@@ -475,6 +493,8 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (appTitleLink) appTitleLink.textContent = pageTitle;
         if (ttsFormHeader) ttsFormHeader.textContent = `Generate Speech`;
         loadInitialUiState();
+        initMultiUiFromState();
+        if (bookSectionSizeInput) bookSectionSizeInput.value = currentUiState.chapters_per_section || 50;
         populatePredefinedVoices();
         populateReferenceFiles();
         populatePresets();
@@ -531,9 +551,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function loadInitialUiState() {
-        if (textArea && currentUiState.last_text) {
-            textArea.value = currentUiState.last_text;
-            if (charCount) charCount.textContent = textArea.value.length;
+        // Browsers may restore form values independently of application state.
+        // Text is intentionally never restored between page loads.
+        if (textArea) {
+            textArea.value = '';
+            if (charCount) charCount.textContent = '0';
         }
         const modeRadioToSelect = document.querySelector(`input[name="voice_mode"][value="${currentVoiceMode}"]`);
         if (modeRadioToSelect) modeRadioToSelect.checked = true;
@@ -561,13 +583,15 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (outputFormatSelect) outputFormatSelect.value = currentConfig?.audio_output?.format || 'mp3';
         if (hideChunkWarningCheckbox) hideChunkWarningCheckbox.checked = hideChunkWarning;
         if (hideGenerationWarningCheckbox) hideGenerationWarningCheckbox.checked = hideGenerationWarning;
-        if (textArea && !textArea.value && appPresets && appPresets.length > 0) {
-            const defaultPreset = appPresets.find(p => p.name === "Standard Narration") || appPresets[0];
-            if (defaultPreset) applyPreset(defaultPreset, false, false);
-        }
+        // keep_notes defaults to true for configs created before this setting existed.
+        if (bookRemoveNotesCheckbox) bookRemoveNotesCheckbox.checked = currentUiState.keep_notes === false;
     }
 
     function attachStateSavingListeners() {
+        // Re-fetching settings after a configuration save must not register
+        // duplicate listeners (and therefore duplicate persistence requests).
+        if (listenersAttached) return;
+        listenersAttached = true;
         voiceModeRadios.forEach(radio => {
             radio.addEventListener('change', debouncedSaveState);
         });
@@ -595,6 +619,8 @@ document.addEventListener('DOMContentLoaded', async function () {
         });
         if (languageSelect) languageSelect.addEventListener('change', debouncedSaveState);
         if (outputFormatSelect) outputFormatSelect.addEventListener('change', debouncedSaveState);
+        if (bookRemoveNotesCheckbox) bookRemoveNotesCheckbox.addEventListener('change', debouncedSaveState);
+        if (bookSectionSizeInput) bookSectionSizeInput.addEventListener('change', debouncedSaveState);
     }
 
     // --- Dynamic UI Population ---
@@ -909,6 +935,16 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function proceedWithSubmissionChecks() {
+        const isMulti = multiRunToggle && multiRunToggle.checked;
+        if (isMulti) {
+            const items = buildMultiRequestsArray();
+            if (items.length === 0) {
+                showNotification("Add at least one text box with content for multi-run.", "error");
+                return;
+            }
+            submitMultiTTSRequests();
+            return;
+        }
         const textContent = getCurrentTextContent();
         const isSplittingEnabled = splitTextToggle.checked;
         const currentChunkSz = parseInt(chunkSizeSlider.value, 10);
@@ -1004,8 +1040,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
             // Clear multi-text boxes
             if (multiTextsContainer) {
-                multiTextsContainer.innerHTML = '';
-                ensureAtLeastOneMultiBox();
+                resetMultiTextBoxes();
             }
 
             // Reset character count
@@ -1106,12 +1141,17 @@ document.addEventListener('DOMContentLoaded', async function () {
             "tts_engine.device": currentConfig.tts_engine?.device, "tts_engine.default_voice_id": currentConfig.tts_engine?.default_voice_id,
             "paths.model_cache": currentConfig.paths?.model_cache, "tts_engine.predefined_voices_path": currentConfig.tts_engine?.predefined_voices_path,
             "tts_engine.reference_audio_path": currentConfig.tts_engine?.reference_audio_path, "paths.output": currentConfig.paths?.output,
-            "audio_output.format": currentConfig.audio_output?.format, "audio_output.sample_rate": currentConfig.audio_output?.sample_rate
+            "audio_output.format": currentConfig.audio_output?.format, "audio_output.sample_rate": currentConfig.audio_output?.sample_rate,
+            "ui_state.initial_textbox_count": currentConfig.ui_state?.initial_textbox_count,
+            "ui_state.chapters_per_section": currentConfig.ui_state?.chapters_per_section,
+            "ui_state.multi_run_enabled": currentConfig.ui_state?.multi_run_enabled,
+            "ui_state.keep_notes": currentConfig.ui_state?.keep_notes
         };
         for (const name in fieldsToDisplay) {
             const input = serverConfigForm.querySelector(`input[name="${name}"]`);
             if (input) {
-                input.value = fieldsToDisplay[name] !== undefined ? fieldsToDisplay[name] : '';
+                if (input.type === 'checkbox') input.checked = !!fieldsToDisplay[name];
+                else input.value = fieldsToDisplay[name] !== undefined ? fieldsToDisplay[name] : '';
                 if (name.includes('.host') || name.includes('.port') || name.includes('.device') || name.includes('paths.')) input.readOnly = true;
                 else input.readOnly = false;
             }
@@ -1358,13 +1398,420 @@ document.addEventListener('DOMContentLoaded', async function () {
             newGenBtn.addEventListener('click', (e) => {
                 e.preventDefault();
                 if (isGenerating) return;
-                // Submit all non-empty multi textboxes as a batch
-                submitMultiTTSRequests();
+                proceedWithSubmissionChecks();
             });
         }
     } catch (err) {
         console.error('Error re-binding Generate button for batch mode:', err);
     }
 
+    // --- Whole-book import, preview, and persistent queue ---
+    let pendingBookFiles = [];
+    let currentBookPreview = null;
+    const bookFilesInput = document.getElementById('book-files-input');
+    const bookFolderInput = document.getElementById('book-folder-input');
+    const bookPreviewBtn = document.getElementById('book-preview-btn');
+    const bookPreviewArea = document.getElementById('book-preview');
+    const bookPreviewModal = document.getElementById('book-preview-modal');
+    const bookJobsArea = document.getElementById('book-jobs');
+    const bookDropZone = document.getElementById('book-drop-zone');
+    const bookDropStatus = document.getElementById('book-drop-status');
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const BOOK_SOURCE_EXTENSIONS = new Set(['.epub', '.txt']);
+
+    function isBookSourceFile(file) {
+        const name = String(file?.name || '');
+        return BOOK_SOURCE_EXTENSIONS.has(name.slice(name.lastIndexOf('.')).toLowerCase());
+    }
+
+    function setBookDropActive(active) {
+        bookDropZone?.classList.toggle('book-drop-active', active);
+        bookDropZone?.setAttribute('aria-dropeffect', active ? 'copy' : 'none');
+    }
+
+    function fileDropKey(file) {
+        return [file.bookRelativePath || file.webkitRelativePath || file.name, file.size, file.lastModified].join('\u0000');
+    }
+
+    function rememberBookRelativePath(file, relativePath) {
+        if (!file || !relativePath || file.bookRelativePath) return file;
+        try { Object.defineProperty(file, 'bookRelativePath', {value: relativePath, configurable: true}); }
+        catch (_) { /* FormData can still fall back to the browser filename. */ }
+        return file;
+    }
+
+    function uniqueBookFiles(files) {
+        const seen = new Set();
+        return files.filter(file => {
+            const key = fileDropKey(file);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
+    function selectBookFiles(files) {
+        const supplied = uniqueBookFiles(Array.from(files || []).filter(Boolean));
+        const supported = supplied.filter(isBookSourceFile);
+        const unsupported = supplied.filter(file => !isBookSourceFile(file));
+        const epubFiles = supported.filter(file => file.name.toLowerCase().endsWith('.epub'));
+        const invalidBookMix = epubFiles.length > 0 && supported.length !== 1;
+        pendingBookFiles = invalidBookMix ? [] : supported;
+        bookPreviewBtn.disabled = pendingBookFiles.length === 0;
+        bookDropZone?.classList.toggle('book-drop-ready', pendingBookFiles.length > 0);
+        if (bookDropStatus) {
+            bookDropStatus.textContent = invalidBookMix
+                ? 'Choose exactly one EPUB, or a bundle containing TXT files only.'
+                : pendingBookFiles.length
+                ? `${pendingBookFiles.length} supported book source file(s) selected. Ready to preview.`
+                : 'No supported EPUB or TXT files selected.';
+        }
+        if (invalidBookMix) {
+            showNotification('Choose exactly one EPUB, or a bundle containing TXT files only.', 'error', 6000);
+            return;
+        }
+        if (pendingBookFiles.length) showNotification(`${pendingBookFiles.length} book source file(s) selected.`, 'info', 2500);
+        if (unsupported.length) showNotification(`Ignored ${unsupported.length} unsupported file(s). Use EPUB or TXT files only.`, pendingBookFiles.length ? 'warning' : 'error', 6000);
+        if (!supplied.length) showNotification('No usable files were dropped. Drop an EPUB, TXT file, or a folder containing TXT files.', 'error', 6000);
+    }
+
+    function isFileDrag(event) {
+        const transfer = event.dataTransfer;
+        if (!transfer) return false;
+        return Array.from(transfer.types || []).includes('Files')
+            || Array.from(transfer.items || []).some(item => item.kind === 'file');
+    }
+
+    function entryFiles(entry, parentPath = '') {
+        if (!entry) return Promise.resolve([]);
+        const relativePath = String(entry.fullPath || `${parentPath}/${entry.name || ''}`).replace(/^\/+/, '');
+        if (entry.isFile) {
+            return new Promise(resolve => entry.file(
+                file => resolve([rememberBookRelativePath(file, relativePath)]),
+                () => resolve([]),
+            ));
+        }
+        if (!entry.isDirectory) return Promise.resolve([]);
+        const reader = entry.createReader();
+        const readAllEntries = () => new Promise(resolve => {
+            const collected = [];
+            const readNext = () => reader.readEntries(entries => {
+                if (!entries.length) return resolve(collected);
+                collected.push(...entries);
+                readNext();
+            }, () => resolve(collected));
+            readNext();
+        });
+        return readAllEntries().then(entries => Promise.all(entries.map(child => entryFiles(child, relativePath))).then(groups => groups.flat()));
+    }
+
+    async function droppedBookFiles(transfer) {
+        const directFiles = Array.from(transfer?.files || []);
+        const itemFiles = Array.from(transfer?.items || [])
+            .map(item => item.kind === 'file' ? item.getAsFile?.() : null)
+            .filter(Boolean);
+        const directoryEntries = Array.from(transfer?.items || [])
+            .map(item => item.kind === 'file' ? item.webkitGetAsEntry?.() : null)
+            .filter(entry => entry?.isDirectory);
+        const directoryFiles = (await Promise.all(directoryEntries.map(entry => entryFiles(entry)))).flat();
+        return uniqueBookFiles([...directFiles, ...itemFiles, ...directoryFiles]);
+    }
+
+    function calculateBookOutputGroups(numbers, size, mergeTail, available = availableBookChapterNumbers()) {
+        const wanted = new Set(numbers);
+        const requestedStart = parseInt(document.getElementById('book-range-start')?.value, 10);
+        const requestedEnd = parseInt(document.getElementById('book-range-end')?.value, 10);
+        if (!Number.isFinite(requestedStart) || !Number.isFinite(requestedEnd) || requestedStart > requestedEnd) return [];
+        const availableInRange = available.filter(number => number >= requestedStart && number <= requestedEnd);
+        if (!availableInRange.length) return [];
+        const availableSet = new Set(availableInRange);
+        const effectiveEnd = Math.max(...availableInRange);
+        const groups = [];
+        for (let chapterStart = requestedStart; chapterStart <= effectiveEnd; chapterStart += size) {
+            const chapterEnd = Math.min(chapterStart + size - 1, effectiveEnd);
+            const chapters = availableInRange.filter(number => number >= chapterStart && number <= chapterEnd && wanted.has(number));
+            const runs = [];
+            chapters.forEach(number => {
+                if (!runs.length || number !== runs[runs.length - 1][runs[runs.length - 1].length - 1] + 1) runs.push([number]);
+                else runs[runs.length - 1].push(number);
+            });
+            runs.forEach((run, index) => {
+                const runStart = run[0];
+                const runEnd = run[run.length - 1];
+                const nextStart = index + 1 < runs.length ? runs[index + 1][0] : chapterEnd + 1;
+                // Assign the separator to the preceding output.  This tells
+                // the listener why a later file starts after a gap, while the
+                // generated filename always uses the actual spoken range.
+                const relevantStart = index === 0 ? chapterStart : runEnd + 1;
+                const relevantEnd = nextStart - 1;
+                const missing = [];
+                const omitted = [];
+                for (let number = relevantStart; number <= relevantEnd; number += 1) {
+                    if (!availableSet.has(number)) missing.push(number);
+                    else if (!wanted.has(number)) omitted.push(number);
+                }
+                groups.push({chapterStart: runStart, chapterEnd: runEnd, chapters: run, missing, omitted, bucketStart: chapterStart, bucketEnd: chapterEnd});
+            });
+        }
+        if (mergeTail && groups.length > 1) {
+            const tail = groups[groups.length - 1];
+            const previous = groups[groups.length - 2];
+            const tailSpan = tail.bucketEnd - tail.bucketStart + 1;
+            if (tailSpan < size
+                && tail.chapterStart === tail.bucketStart && tail.chapterEnd === tail.bucketEnd
+                && !tail.missing.length && !tail.omitted.length
+                && previous.chapterEnd + 1 === tail.chapterStart
+                && previous.bucketEnd + 1 === tail.bucketStart) {
+                previous.chapterEnd = tail.chapterEnd;
+                previous.chapters.push(...tail.chapters);
+                previous.missing.push(...tail.missing);
+                previous.omitted.push(...tail.omitted);
+                previous.bucketEnd = tail.bucketEnd;
+                groups.pop();
+            }
+        }
+        return groups;
+    }
+
+    function updateBookGroupPreview() {
+        const output = document.getElementById('book-output-groups');
+        const merge = document.getElementById('book-merge-final');
+        if (!output || !merge) return;
+        const size = Math.max(1, parseInt(document.getElementById('book-section-size').value || 50, 10));
+        const selected = Array.from(document.querySelectorAll('.book-chapter-check:checked')).map(box => Number(box.value));
+        const unmerged = calculateBookOutputGroups(selected, size, false);
+        const tail = unmerged[unmerged.length - 1];
+        const previous = unmerged[unmerged.length - 2];
+        const hasShortMergeableTail = !!tail && !!previous
+            && tail.bucketEnd - tail.bucketStart + 1 < size
+            && tail.chapterStart === tail.bucketStart && tail.chapterEnd === tail.bucketEnd
+            && !tail.missing.length && !tail.omitted.length
+            && previous.chapterEnd + 1 === tail.chapterStart
+            && previous.bucketEnd + 1 === tail.bucketStart;
+        merge.disabled = !hasShortMergeableTail;
+        if (!hasShortMergeableTail) merge.checked = false;
+        const groups = calculateBookOutputGroups(selected, size, merge.checked);
+        output.innerHTML = groups.length ? `<div class="text-sm mb-1">${groups.length} output file(s) planned:</div>` + groups.map((group, index) => {
+            const span = group.chapterEnd - group.chapterStart + 1;
+            const isCompleteNominalBucket = group.chapterStart === group.bucketStart && group.chapterEnd === group.bucketEnd;
+            const isNominalPartialTail = isCompleteNominalBucket && group.bucketEnd - group.bucketStart + 1 < size;
+            const isGapSplit = !isCompleteNominalBucket;
+            const details = [group.missing.length ? `missing ${group.missing.join(', ')}` : '', group.omitted.length ? `${group.omitted.length} unchecked` : ''].filter(Boolean).join('; ');
+            return `<div class="text-sm py-1 ${(isNominalPartialTail || isGapSplit) ? 'text-amber-600' : ''}">Output ${index + 1}: chapters <strong>${group.chapterStart}&ndash;${group.chapterEnd}</strong> (${group.chapters.length} detected chapters)${span > size ? ' &mdash; merged final group' : isGapSplit ? ' &mdash; split around a missing or unchecked chapter' : isNominalPartialTail ? ' &mdash; partial final group' : ''}${details ? `<span class="block text-amber-600">Warning: ${details}</span>` : ''}</div>`;
+        }).join('') : '<div class="text-sm text-amber-600">No chapters selected.</div>';
+    }
+    // Count real detected chapters, rather than a numeric chapter span, so a
+    // range with gaps never silently exceeds the batch safety limit.
+    const BOOK_AUTO_END_CHAPTER_LIMIT = 600;
+
+    function availableBookChapterNumbers() {
+        return [...new Set(Array.from(bookPreviewArea?.querySelectorAll('.book-chapter-check') || [], box => Number(box.value)))]
+            .filter(Number.isFinite);
+    }
+
+    function autoBookRangeEnd(start, available = availableBookChapterNumbers()) {
+        if (!Number.isFinite(start)) return null;
+        const startIndex = available.findIndex(number => number >= start);
+        return startIndex < 0 ? null : available[Math.min(available.length - 1, startIndex + BOOK_AUTO_END_CHAPTER_LIMIT - 1)];
+    }
+
+    function updateAutomaticBookRangeEnd() {
+        const startInput = document.getElementById('book-range-start');
+        const endInput = document.getElementById('book-range-end');
+        const end = autoBookRangeEnd(parseInt(startInput?.value, 10));
+        if (!endInput || end === null) return false;
+        endInput.value = String(end);
+        return true;
+    }
+
+    function updateBookSectionChecks() {
+        bookPreviewArea?.querySelectorAll('.book-section-check').forEach(sectionBox => {
+            const children = Array.from(bookPreviewArea.querySelectorAll(`.book-chapter-check[data-section="${CSS.escape(sectionBox.value)}"]`));
+            sectionBox.checked = children.length > 0 && children.every(box => box.checked);
+            sectionBox.indeterminate = children.some(box => box.checked) && !sectionBox.checked;
+        });
+    }
+
+    document.getElementById('book-files-btn')?.addEventListener('click', () => bookFilesInput.click());
+    document.getElementById('book-folder-btn')?.addEventListener('click', () => bookFolderInput.click());
+    bookFilesInput?.addEventListener('change', e => selectBookFiles(e.target.files));
+    bookFolderInput?.addEventListener('change', e => selectBookFiles(e.target.files));
+    // File drops outside the target must still be cancelled, otherwise browsers
+    // often navigate to (and replace the app with) the dropped EPUB or TXT file.
+    ['dragenter', 'dragover', 'drop'].forEach(name => document.addEventListener(name, event => {
+        if (isFileDrag(event)) event.preventDefault();
+    }));
+    bookDropZone?.addEventListener('dragenter', event => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        setBookDropActive(true);
+    });
+    bookDropZone?.addEventListener('dragover', event => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        setBookDropActive(true);
+    });
+    bookDropZone?.addEventListener('dragleave', event => {
+        if (!isFileDrag(event)) return;
+        // Drag events fire as the pointer moves across child buttons; only clear
+        // the highlight after it actually leaves the whole target.
+        if (!bookDropZone.contains(event.relatedTarget)) setBookDropActive(false);
+    });
+    bookDropZone?.addEventListener('drop', async event => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setBookDropActive(false);
+        const files = await droppedBookFiles(event.dataTransfer);
+        selectBookFiles(files);
+    });
+
+    bookPreviewBtn?.addEventListener('click', async () => {
+        const form = new FormData();
+        pendingBookFiles.forEach(file => form.append('files', file, file.bookRelativePath || file.webkitRelativePath || file.name));
+        form.append('remove_notes', document.getElementById('book-remove-notes').checked);
+        form.append('chapters_per_section', document.getElementById('book-section-size').value || '50');
+        bookPreviewBtn.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/book-imports/preview`, {method: 'POST', body: form});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.detail || 'Book import failed.');
+            currentBookPreview = result;
+            document.getElementById('book-title').value = result.title;
+            const notices = [...(result.errors || []).map(x => `<li class="text-red-600">Error: ${escapeHtml(x)}</li>`), ...(result.warnings || []).map(x => `<li class="text-amber-600">Warning: ${escapeHtml(x)}</li>`)].join('');
+            const suggestedStart = result.suggested_chapter_start;
+            const suggestedEnd = result.suggested_chapter_end;
+            const sections = result.sections.map(s => {
+                const chapterChecks = s.chapters.map(ch => `<label class="inline-flex items-center mr-3 mb-1"><input class="book-chapter-check mr-1" data-section="${escapeHtml(s.id)}" type="checkbox" value="${ch.number}" ${ch.number >= suggestedStart && ch.number <= suggestedEnd ? 'checked' : ''}>${ch.number}</label>`).join('');
+                return `<details class="border rounded p-2 mb-2"><summary><label><input class="book-section-check mr-2" type="checkbox" value="${escapeHtml(s.id)}">Chapters ${s.chapter_start}–${s.chapter_end}</label> · ${s.chapter_count} chapters · ${s.character_count.toLocaleString()} characters</summary><div class="pt-2 text-sm">${chapterChecks}</div></details>`;
+            }).join('');
+            const resumeText = suggestedStart > result.sections[0]?.chapter_start ? ` Suggested from previous incomplete work: chapter ${suggestedStart}.` : '';
+            bookPreviewArea.innerHTML = `<div class="font-semibold">${escapeHtml(result.title)} — ${result.chapter_count} chapters</div><p class="text-sm my-2">Choose exact chapters below. Outputs are split into groups of <strong>${escapeHtml(document.getElementById('book-section-size').value || 50)}</strong>. The initial selection is capped at 600 chapters.${escapeHtml(resumeText)}</p><ul class="text-sm my-2">${notices}</ul><div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3"><label class="text-sm">Starting chapter<input id="book-range-start" type="number" class="input-base" value="${suggestedStart}"></label><label class="text-sm">Ending chapter<input id="book-range-end" type="number" class="input-base" value="${suggestedEnd}"></label><button type="button" id="book-apply-range" class="btn-secondary self-end">Select range</button><button type="button" id="book-clear-selection" class="btn-secondary self-end">Uncheck all</button></div><button type="button" id="start-book-job" class="btn-primary mb-3" ${result.errors?.length ? 'disabled' : ''}>Generate selected chapters</button><div>${sections}</div><div class="card-base p-3 mt-3"><div class="font-semibold">Planned output files</div><div id="book-output-groups" class="my-2"></div><label class="text-sm"><input id="book-merge-final" type="checkbox" class="mr-2">Merge each eligible partial final group into its preceding file</label></div>`;
+            const rangeEnd = document.getElementById('book-range-end');
+            const rangeControls = rangeEnd?.closest('div');
+            if (rangeEnd && rangeControls) {
+                rangeEnd.setAttribute('aria-describedby', 'book-auto-end-help');
+                const autoEndLabel = document.createElement('label');
+                autoEndLabel.className = 'text-sm self-end';
+                autoEndLabel.innerHTML = '<input id="book-auto-end" type="checkbox" class="mr-2" checked>Automatically set ending chapter <span id="book-auto-end-help" class="block text-xs">Up to 600 detected chapters from the start.</span>';
+                rangeControls.insertBefore(autoEndLabel, document.getElementById('book-apply-range'));
+            }
+            bookPreviewArea.querySelectorAll('.book-section-check').forEach(sectionBox => {
+                const children = Array.from(bookPreviewArea.querySelectorAll(`.book-chapter-check[data-section="${CSS.escape(sectionBox.value)}"]`));
+                sectionBox.checked = children.length > 0 && children.every(box => box.checked);
+                sectionBox.indeterminate = children.some(box => box.checked) && !sectionBox.checked;
+            });
+            updateBookGroupPreview();
+            if (bookPreviewModal?.showModal) bookPreviewModal.showModal();
+        } catch (error) { showNotification(error.message, 'error', 0); }
+        finally { bookPreviewBtn.disabled = false; }
+    });
+
+    bookPreviewArea?.addEventListener('click', async e => {
+        if (e.target.id === 'book-apply-range') {
+            const start = parseInt(document.getElementById('book-range-start').value, 10);
+            const end = parseInt(document.getElementById('book-range-end').value, 10);
+            const available = availableBookChapterNumbers();
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || !available.some(number => number >= start && number <= end)) {
+                showNotification('Enter a valid starting and ending chapter within this book.', 'error');
+                return;
+            }
+            document.querySelectorAll('.book-chapter-check').forEach(box => box.checked = Number(box.value) >= start && Number(box.value) <= end);
+            document.querySelectorAll('.book-section-check').forEach(sectionBox => {
+                const children = Array.from(document.querySelectorAll(`.book-chapter-check[data-section="${CSS.escape(sectionBox.value)}"]`));
+                sectionBox.checked = children.length > 0 && children.every(box => box.checked);
+                sectionBox.indeterminate = children.some(box => box.checked) && !sectionBox.checked;
+            });
+            updateBookGroupPreview();
+            return;
+        }
+        if (e.target.id === 'book-clear-selection') {
+            document.querySelectorAll('.book-chapter-check, .book-section-check').forEach(box => box.checked = false);
+            updateBookGroupPreview();
+            return;
+        }
+        if (e.target.classList.contains('book-section-check')) {
+            document.querySelectorAll(`.book-chapter-check[data-section="${CSS.escape(e.target.value)}"]`).forEach(box => box.checked = e.target.checked);
+            updateBookGroupPreview();
+            return;
+        }
+        if (e.target.classList.contains('book-chapter-check')) {
+            const sectionBox = document.querySelector(`.book-section-check[value="${CSS.escape(e.target.dataset.section)}"]`);
+            const children = Array.from(document.querySelectorAll(`.book-chapter-check[data-section="${CSS.escape(e.target.dataset.section)}"]`));
+            if (sectionBox) {
+                sectionBox.checked = children.every(box => box.checked);
+                sectionBox.indeterminate = children.some(box => box.checked) && !sectionBox.checked;
+            }
+            updateBookGroupPreview();
+            return;
+        }
+        if (e.target.id !== 'start-book-job' || !currentBookPreview) return;
+        const selected = Array.from(document.querySelectorAll('.book-section-check:checked')).map(x => x.value);
+        const selectedChapters = Array.from(document.querySelectorAll('.book-chapter-check:checked')).map(x => parseInt(x.value, 10));
+        if (!selectedChapters.length) { showNotification('Select at least one chapter.', 'error'); return; }
+        const requestedChapterStart = parseInt(document.getElementById('book-range-start')?.value, 10);
+        const requestedChapterEnd = parseInt(document.getElementById('book-range-end')?.value, 10);
+        if (!Number.isFinite(requestedChapterStart) || !Number.isFinite(requestedChapterEnd) || requestedChapterStart > requestedChapterEnd || selectedChapters.some(number => number < requestedChapterStart || number > requestedChapterEnd)) {
+            showNotification('Select chapters within a valid requested chapter range.', 'error');
+            return;
+        }
+        const payload = buildRequestForSingleControls('placeholder'); delete payload.text; payload.output_format = 'mp3';
+        Object.assign(payload, {import_id: currentBookPreview.id, book_title: document.getElementById('book-title').value, selected_sections: selected, selected_chapters: selectedChapters, chapters_per_section: parseInt(document.getElementById('book-section-size').value || 50, 10), merge_final_section: !!document.getElementById('book-merge-final')?.checked, requested_chapter_start: requestedChapterStart, requested_chapter_end: requestedChapterEnd});
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/book-jobs`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+            const result = await response.json(); if (!response.ok) throw new Error(result.detail || 'Could not start job.');
+            showNotification('Audiobook job started.', 'success'); refreshBookJobs();
+        } catch (error) { showNotification(error.message, 'error', 0); }
+    });
+    bookPreviewArea?.addEventListener('input', e => {
+        if (e.target.id === 'book-range-start' && document.getElementById('book-auto-end')?.checked) {
+            updateAutomaticBookRangeEnd();
+        }
+        if (e.target.id === 'book-range-end') {
+            const autoEnd = document.getElementById('book-auto-end');
+            if (autoEnd) autoEnd.checked = false;
+        }
+    });
+    bookPreviewArea?.addEventListener('change', e => {
+        if (e.target.id === 'book-merge-final') updateBookGroupPreview();
+        if (e.target.id === 'book-range-start' && document.getElementById('book-auto-end')?.checked) {
+            updateAutomaticBookRangeEnd();
+            document.getElementById('book-apply-range')?.click();
+        }
+        if (e.target.id === 'book-range-end') {
+            const autoEnd = document.getElementById('book-auto-end');
+            if (autoEnd) autoEnd.checked = false;
+            document.getElementById('book-apply-range')?.click();
+        }
+        if (e.target.id === 'book-auto-end' && e.target.checked) updateAutomaticBookRangeEnd();
+    });
+    document.getElementById('book-section-size')?.addEventListener('change', updateBookGroupPreview);
+    document.getElementById('book-preview-close')?.addEventListener('click', () => bookPreviewModal?.close());
+
+    window.addEventListener('pageshow', event => {
+        if (event.persisted) {
+            if (textArea) textArea.value = '';
+            resetMultiTextBoxes();
+        }
+    });
+
+    async function refreshBookJobs() {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/book-jobs`); if (!response.ok) return;
+            const jobs = await response.json();
+            bookJobsArea.innerHTML = jobs.map(job => {
+                const sections = job.sections.map(s => `<div class="text-sm">Ch ${s.chapter_start}–${s.chapter_end}: ${escapeHtml(s.state)} (${s.completed_chapters}/${s.chapter_count}) ${s.state === 'completed' ? `<a href="${API_BASE_URL}/outputs/${encodeURIComponent(s.output_name)}">${escapeHtml(s.output_name)}</a>` : ''} ${s.error ? `<span class="text-red-600">${escapeHtml(s.error)}</span>` : ''}</div>`).join('');
+                return `<div class="card-base p-3 mt-3"><div class="font-semibold">${escapeHtml(job.book_title)} — ${escapeHtml(job.state)}</div>${sections}<div class="flex gap-2 mt-2"><button class="btn-secondary book-control" data-id="${job.id}" data-action="pause">Pause</button><button class="btn-secondary book-control" data-id="${job.id}" data-action="resume">Resume</button><button class="btn-secondary book-control" data-id="${job.id}" data-action="retry-failed">Retry failed</button><button class="btn-secondary book-control" data-id="${job.id}" data-action="cancel">Cancel</button></div></div>`;
+            }).join('');
+        } catch (_) { /* polling should not disrupt ordinary TTS */ }
+    }
+    bookJobsArea?.addEventListener('click', async e => {
+        const button = e.target.closest('.book-control'); if (!button) return;
+        await fetch(`${API_BASE_URL}/api/book-jobs/${button.dataset.id}/${button.dataset.action}`, {method:'POST'}); refreshBookJobs();
+    });
+
     await fetchInitialData();
+    refreshBookJobs();
+    setInterval(refreshBookJobs, 5000);
 });

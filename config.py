@@ -60,7 +60,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "reference_audio_path": str(
             DEFAULT_REFERENCE_AUDIO_PATH
         ),  # Directory for reference audio files for cloning.
-        "default_voice_id": "default_sample.wav",  # Default voice file to use if none is specified.
+        "default_voice_id": "Henry.wav",  # Default voice file to use if none is specified.
     },
     "paths": {  # General configurable paths for the application.
         "model_cache": str(
@@ -73,18 +73,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "generation_defaults": {  # Default parameters for TTS audio generation.
         "temperature": 0.8,  # Controls randomness: lower is more deterministic.
         "exaggeration": 0.5,  # Controls expressiveness or exaggeration in speech.
-        "cfg_weight": 0.5,  # Classifier-Free Guidance weight, influences adherence to prompt/style.
+        "cfg_weight": 0.6,  # Classifier-Free Guidance weight, influences adherence to prompt/style.
         "seed": 0,  # Random seed for generation. 0 often means random or engine default.
         "speed_factor": 1.0,  # Controls the speed of the generated speech.
         "language": "en",  # Default language for TTS.
     },
     "audio_output": {  # Settings related to the format of generated audio.
-        "format": "wav",  # Output audio format (e.g., 'wav', 'mp3').
+        "format": "mp3",  # Output audio format (e.g., 'wav', 'mp3').
         "sample_rate": 24000,  # Sample rate of the output audio in Hz.
         "max_reference_duration_sec": 30,  # Maximum duration for reference audio files.
     },
     "ui_state": {  # Stores user interface preferences and last-used values.
-        "last_text": "",  # Last text entered by the user.
+        "multi_run_enabled": True,
+        "initial_textbox_count": 11,
+        "chapters_per_section": 50,
+        "keep_notes": True,
         "last_voice_mode": "predefined",  # Last selected voice mode ('predefined' or 'clone').
         "last_predefined_voice": None,  # Filename of the last used predefined voice.
         "last_reference_file": None,  # Filename of the last used reference audio file.

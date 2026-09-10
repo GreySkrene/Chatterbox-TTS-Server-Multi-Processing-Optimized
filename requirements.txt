@@ -30,6 +30,7 @@ descript-audio-codec            # Audio codec for ML applications
 
 # --- Audio I/O & Processing ---
 soundfile                       # Audio file I/O (requires libsndfile system library)
+lameenc                         # Bundled streaming MP3 encoder (no FFmpeg executable required)
 pydub                          # Simple audio manipulation
 audiotsm                       # Audio time-scale modification
 praat-parselmouth              # Python interface to Praat speech analysis

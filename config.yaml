@@ -14,14 +14,14 @@ tts_engine:
   device: cuda
   predefined_voices_path: voices
   reference_audio_path: reference_audio
-  default_voice_id: Emily.wav
+  default_voice_id: Henry.wav
 paths:
   model_cache: model_cache
   output: outputs
 generation_defaults:
   temperature: 0.2
   exaggeration: 0.5
-  cfg_weight: 0.59
+  cfg_weight: 0.6
   seed: 3000
   speed_factor: 1
   language: en
@@ -30,11 +30,14 @@ audio_output:
   sample_rate: 24000
   max_reference_duration_sec: 30
 ui_state:
-  last_text: hello
+  multi_run_enabled: true
+  initial_textbox_count: 11
+  chapters_per_section: 50
+  keep_notes: true
   last_voice_mode: predefined
   last_predefined_voice: Henry.wav
   last_reference_file: Gianna.wav
-  last_seed: 3000
+  last_seed: 42
   last_chunk_size: 410
   last_split_text_enabled: true
   hide_chunk_warning: false

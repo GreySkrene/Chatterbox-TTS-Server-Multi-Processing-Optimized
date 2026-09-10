@@ -12,6 +12,7 @@ torchaudio @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchaudio-2.
 pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/pytorch_triton_rocm-3.2.0%2Brocm6.4.1.git6da9e660-cp310-cp310-linux_x86_64.whl
 numpy
 soundfile # Requires libsndfile system library (e.g., sudo apt-get install libsndfile1 on Debian/Ubuntu)
+lameenc # Bundled streaming MP3 encoder; no FFmpeg executable required
 huggingface_hub
 descript-audio-codec
 safetensors

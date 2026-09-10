@@ -59,9 +59,37 @@
                 <div id="notification-area" class="mb-6 space-y-3"></div>
 
                 <div class="card-base">
-                    <form id="tts-form" action="#" method="post" class="flex flex-col" onsubmit="return false;">
+                    <form id="tts-form" action="#" method="post" class="flex flex-col" autocomplete="off" onsubmit="return false;">
                         <div class="p-6 sm:p-8">
                             <h2 id="tts-form-header" class="card-header">Generate Speech</h2>
+
+                            <section id="book-import-panel" class="card-base p-4 mb-6">
+                                <h3 class="font-semibold mb-3">Import a book</h3>
+                                <div id="book-drop-zone" class="border-2 border-dashed rounded p-5 text-center mb-3" tabindex="0" aria-describedby="book-drop-status">
+                                    Drop one EPUB, TXT files, or a folder here
+                                    <div class="mt-3 flex justify-center gap-2">
+                                        <button type="button" id="book-files-btn" class="btn-secondary">Browse files</button>
+                                        <button type="button" id="book-folder-btn" class="btn-secondary">Browse folder</button>
+                                    </div>
+                                    <input id="book-files-input" type="file" accept=".epub,.txt" multiple class="hidden">
+                                    <input id="book-folder-input" type="file" accept=".txt" multiple webkitdirectory directory class="hidden">
+                                </div>
+                                <p id="book-drop-status" class="text-sm text-slate-500 dark:text-slate-400 mb-3" aria-live="polite">No book source selected.</p>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div class="md:col-span-2"><label class="label-base" for="book-title">Book Title</label><input id="book-title" class="input-base" type="text"></div>
+                                    <div><label class="label-base" for="book-section-size">Chapters per section</label><input id="book-section-size" class="input-base" type="number" min="1" max="500" value="50"></div>
+                                </div>
+                                <label class="flex items-center text-sm mt-3"><input id="book-remove-notes" type="checkbox" class="mr-2">Remove recognized footnote/translator-note blocks</label>
+                                <button type="button" id="book-preview-btn" class="btn-primary mt-3" disabled>Preview whole book</button>
+                                <dialog id="book-preview-modal" class="card-base" aria-labelledby="book-preview-heading">
+                                    <div class="book-preview-modal-header">
+                                        <h3 id="book-preview-heading" class="font-semibold">Select audiobook chapters</h3>
+                                        <button type="button" id="book-preview-close" class="btn-secondary">Close</button>
+                                    </div>
+                                    <div id="book-preview" class="book-preview-modal-content"></div>
+                                </dialog>
+                                <div id="book-jobs" class="mt-4"></div>
+                            </section>
 
 
 
@@ -117,21 +145,32 @@
                                 <input type="checkbox" id="multi-run-toggle" class="mr-2 h-4 w-4">
                                 Enable Multi-run (batch)
                                 </label>
-                                <button type="button" id="add-text-btn" class="btn-secondary" title="Add another text box">Add Text</button>
                             </div>
 
                             <!-- Single textarea wrapper (kept for compatibility and saved-state) -->
                             <div id="single-text-wrapper" class="relative">
-                                <textarea name="text" id="text" rows="8" class="textarea-base" placeholder="Enter text here..."></textarea>
+                                <textarea name="text" id="text" rows="8" class="textarea-base" placeholder="Enter text here..." autocomplete="off"></textarea>
                                 <div class="absolute bottom-2.5 right-3 text-xs text-slate-500 dark:text-slate-400">
                                 <span id="char-count">0</span> Characters
                                 </div>
                             </div>
 
-                            <!-- Multi text container (initially hidden) -->
-                            <div id="multi-texts-container" class="space-y-4 hidden">
-                                <!-- JS will add .multi-text-item boxes; keep four seeded boxes optional -->
-                            </div>
+                            <!-- Manual batch inputs stay out of the way for book imports until requested. -->
+                            <details id="manual-multi-run-inputs" class="card-base p-4 hidden">
+                                <summary class="flex cursor-pointer items-center justify-between gap-3 font-medium label-base">
+                                    <span>Manual batch text inputs</span>
+                                    <span id="manual-multi-run-input-count" class="text-xs font-normal text-slate-500 dark:text-slate-400">Expand to edit the 11 input boxes</span>
+                                </summary>
+                                <div class="mt-4">
+                                    <div class="flex items-center justify-between gap-3 mb-3">
+                                        <p class="text-xs text-slate-500 dark:text-slate-400">Add one text per box, then generate them as a batch.</p>
+                                        <button type="button" id="add-text-btn" class="btn-secondary flex-shrink-0" title="Add another text box">Add Text</button>
+                                    </div>
+                                    <div id="multi-texts-container" class="space-y-4">
+                                        <!-- JS creates the configured number of .multi-text-item boxes. -->
+                                    </div>
+                                </div>
+                            </details>
                             </div>
                             <!-- ...existing code... -->
 
@@ -409,6 +448,10 @@
                                                     class="label-base text-xs">Audio Sample Rate</label><input
                                                     type="number" id="config-audio_output-sample_rate"
                                                     name="audio_output.sample_rate" class="input-base text-sm"></div>
+                                            <div><label for="config-ui_state-initial_textbox_count" class="label-base text-xs">Initial text boxes</label><input type="number" min="1" max="100" id="config-ui_state-initial_textbox_count" name="ui_state.initial_textbox_count" class="input-base text-sm"></div>
+                                            <div><label for="config-ui_state-chapters_per_section" class="label-base text-xs">Chapters per section</label><input type="number" min="1" max="500" id="config-ui_state-chapters_per_section" name="ui_state.chapters_per_section" class="input-base text-sm"></div>
+                                            <div><label class="label-base text-xs"><input type="checkbox" id="config-ui_state-multi_run_enabled" name="ui_state.multi_run_enabled"> Default multi-run</label></div>
+                                            <div><label class="label-base text-xs"><input type="checkbox" id="config-ui_state-keep_notes" name="ui_state.keep_notes"> Keep recognized footnotes and translator notes</label></div>
 
                                             <div
                                                 class="col-span-1 md:col-span-2 mt-4 flex flex-col md:flex-row gap-4 items-center">
@@ -552,7 +595,7 @@
         </div>
     </div>
 
-    <script src="script.js" defer></script>
+    <script src="script.js?v=20260830-audiobook" defer></script>
 </body>
 
 </html>

@@ -5,15 +5,19 @@
 
 import os
 import io
+import asyncio
 import logging
 import logging.handlers  # For RotatingFileHandler
+import re
 import shutil
 import time
 import uuid
 import yaml  # For loading presets
+import zipfile
 import numpy as np
 import librosa  # For potential direct use if needed, though utils.py handles most
 from pathlib import Path
+from xml.etree import ElementTree as ET
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Literal
 import webbrowser  # For automatic browser opening
@@ -66,6 +70,7 @@ from models import (  # Pydantic models
     UpdateStatusResponse,
 )
 import utils  # Utility functions
+from audiobook import BookStore, JobRunner, capped_chapter_end, chapter_filename, parse_uploads, reserve_filename
 
 from pydantic import BaseModel, Field
 
@@ -77,6 +82,27 @@ class OpenAISpeechRequest(BaseModel):
     response_format: Literal["wav", "opus", "mp3"] = "wav"  # Add "mp3"
     speed: float = 1.0
     seed: Optional[int] = None
+
+
+class BookJobRequest(BaseModel):
+    import_id: str
+    book_title: str = Field(..., min_length=1, max_length=300)
+    selected_sections: List[str] = Field(default_factory=list)
+    selected_chapters: Optional[List[int]] = None
+    chapters_per_section: int = Field(50, ge=1, le=500)
+    merge_final_section: bool = False
+    requested_chapter_start: Optional[int] = None
+    requested_chapter_end: Optional[int] = None
+    voice_mode: Literal["predefined", "clone"] = "predefined"
+    predefined_voice_id: Optional[str] = None
+    reference_audio_filename: Optional[str] = None
+    temperature: Optional[float] = None
+    exaggeration: Optional[float] = None
+    cfg_weight: Optional[float] = None
+    seed: Optional[int] = None
+    speed_factor: Optional[float] = None
+    chunk_size: int = Field(120, ge=50, le=500)
+    output_format: Literal["mp3"] = "mp3"
 
 
 # --- Logging Configuration ---
@@ -103,6 +129,104 @@ logging.basicConfig(
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("watchfiles").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def sanitize_text_for_tokenizer(
+    text: Any,
+) -> str:
+    """Apply the established tokenizer-safety cleanup before text is chunked."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    elif text is None:
+        text = ""
+    elif not isinstance(text, str):
+        text = str(text)
+
+    text = re.sub(r"(?m)^\s*[-\u2010-\u2015\u2013\u2014]+\s*$", "...", text)
+    replacements = {
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-",
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+    }
+    text = re.sub(r"[\u2010-\u2015\u2018\u2019\u201c\u201d]", lambda match: replacements[match.group()], text)
+    text = re.sub(r"\s*\*\s*\*\s*\*.*?$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\[TL[^\]]*\]", "", text)
+    text = re.sub(r"[\[\]]", "", text)
+    text = re.sub(r"\*", "", text)
+    text = re.sub(r"_", " ", text)
+    text = re.sub(r"[\u4e00-\u9fff]", "", text)
+    text = re.sub(r"^[\s-]+", "", text)
+    return text
+
+
+def _write_unique_output_file(output_dir: Path, desired_filename: str, payload: bytes) -> tuple[str, Path]:
+    """Atomically save an output file without replacing an existing download."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reserved: set[str] = set()
+    staging_path = output_dir / f".{uuid.uuid4().hex}.output.tmp"
+    try:
+        with staging_path.open("xb") as output_file:
+            output_file.write(payload)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        while True:
+            filename = reserve_filename(output_dir, desired_filename, reserved)
+            output_path = output_dir / filename
+            try:
+                # A same-directory hard link makes the fully flushed payload
+                # visible in one operation and fails if another request already
+                # claimed the name.  The private staging name is then removed.
+                os.link(staging_path, output_path)
+                return filename, output_path
+            except FileExistsError:
+                reserved.add(filename)
+    finally:
+        staging_path.unlink(missing_ok=True)
+
+
+def _synthesize_book_chapter(text: str, settings: Dict[str, Any], raw_path: Path):
+    """Synthesize one chapter incrementally and append committed float32 PCM."""
+    voice_mode = settings.get("voice_mode", "predefined")
+    if voice_mode == "predefined":
+        voice_name = settings.get("predefined_voice_id") or config_manager.get("tts_engine.default_voice_id", "Henry.wav")
+        prompt = get_predefined_voices_path(ensure_absolute=True) / Path(voice_name).name
+    else:
+        voice_name = settings.get("reference_audio_filename")
+        prompt = get_reference_audio_path(ensure_absolute=True) / Path(voice_name or "").name
+    if not prompt.is_file():
+        raise FileNotFoundError(f"Voice file '{voice_name}' was not found.")
+    safe_text = sanitize_text_for_tokenizer(text)
+    chunks = utils.chunk_text_by_sentences(safe_text, int(settings.get("chunk_size", 120))) or [safe_text]
+    sample_rate = None
+    written = 0
+    with raw_path.open("ab") as raw:
+        for chunk in chunks:
+            tensor, current_rate = engine.synthesize(
+                text=chunk,
+                audio_prompt_path=str(prompt),
+                temperature=settings.get("temperature") if settings.get("temperature") is not None else get_gen_default_temperature(),
+                exaggeration=settings.get("exaggeration") if settings.get("exaggeration") is not None else get_gen_default_exaggeration(),
+                cfg_weight=settings.get("cfg_weight") if settings.get("cfg_weight") is not None else get_gen_default_cfg_weight(),
+                seed=settings.get("seed") if settings.get("seed") is not None else get_gen_default_seed(),
+            )
+            if tensor is None or current_rate is None:
+                raise RuntimeError("TTS returned no audio.")
+            if sample_rate is not None and current_rate != sample_rate:
+                raise RuntimeError("TTS sample rate changed within a chapter.")
+            sample_rate = current_rate
+            if float(settings.get("speed_factor") or 1.0) != 1.0:
+                tensor, _ = utils.apply_speed_factor(tensor, current_rate, float(settings["speed_factor"]))
+            audio = np.asarray(tensor.detach().cpu().numpy(), dtype="<f4").reshape(-1)
+            payload = audio.tobytes()
+            raw.write(payload)
+            written += len(payload)
+        raw.flush()
+        os.fsync(raw.fileno())
+    return int(sample_rate), written
+
+
+book_store = BookStore(Path(__file__).parent / "runtime" / "audiobooks", get_output_path(ensure_absolute=True))
+generation_lock = threading.Lock()
+book_runner = JobRunner(book_store, _synthesize_book_chapter, generation_lock)
 
 # --- Global Variables & Application Setup ---
 startup_complete_event = threading.Event()  # For coordinating browser opening
@@ -198,6 +322,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def serialize_generation_requests(request: Request, call_next):
+    """Keep interactive and queued synthesis from competing for GPU/RAM."""
+    if request.url.path not in {"/tts", "/tts/multi", "/v1/audio/speech"}:
+        return await call_next(request)
+    await asyncio.to_thread(generation_lock.acquire)
+    try:
+        return await call_next(request)
+    finally:
+        generation_lock.release()
+
 # --- Static Files and HTML Templates ---
 ui_static_path = Path(__file__).parent / "ui"
 if ui_static_path.is_dir():
@@ -230,7 +366,7 @@ async def get_main_styles():
 async def get_main_script():
     script_file = ui_static_path / "script.js"
     if script_file.is_file():
-        return FileResponse(script_file)
+        return FileResponse(script_file, headers={"Cache-Control": "no-store, max-age=0"})
     raise HTTPException(status_code=404, detail="script.js not found")
 
 
@@ -258,7 +394,7 @@ async def get_web_ui(request: Request):
     """Serves the main web interface (index.html)."""
     logger.info("Request received for main UI page ('/').")
     try:
-        return templates.TemplateResponse("index.html", {"request": request})
+        return templates.TemplateResponse("index.html", {"request": request}, headers={"Cache-Control": "no-store"})
     except Exception as e_render:
         logger.error(f"Error rendering main UI page: {e_render}", exc_info=True)
         return HTMLResponse(
@@ -317,6 +453,87 @@ async def get_ui_initial_data():
         raise HTTPException(
             status_code=500, detail="Failed to load initial data for UI."
         )
+
+
+@app.post("/api/book-imports/preview", tags=["Audiobooks"])
+async def preview_book_import(
+    files: List[UploadFile] = File(...),
+    remove_notes: bool = Form(False),
+    chapters_per_section: int = Form(50),
+):
+    """Upload browser-selected EPUB/TXT content and create one persistent preview."""
+    if not 1 <= chapters_per_section <= 500:
+        raise HTTPException(status_code=400, detail="chapters_per_section must be between 1 and 500.")
+    uploaded = []
+    try:
+        for item in files:
+            uploaded.append((item.filename or "upload", await item.read()))
+        title, chapters, errors, warnings = parse_uploads(uploaded, remove_notes=remove_notes)
+        result = book_store.create_import(title, chapters, errors, warnings, chapters_per_section, uploaded)
+        # Resume hint: match prior jobs by normalized title and locate their first
+        # unfinished chapter. A newly uploaded copy receives a new import ID.
+        normalized_title = " ".join(title.split()).casefold()
+        resume_candidates = []
+        previously_completed = set()
+        for job in book_store.list_jobs():
+            prior_title = job.get("source_title") or job.get("book_title", "")
+            if " ".join(prior_title.split()).casefold() != normalized_title:
+                continue
+            for section in job.get("sections", []):
+                completed_count = int(section.get("completed_chapters", 0))
+                previously_completed.update(int(c["number"]) for c in section.get("chapters", [])[:completed_count])
+                if job.get("state") != "cancelled" and section.get("state") != "completed":
+                    remaining = section.get("chapters", [])[completed_count:]
+                    if remaining:
+                        resume_candidates.append(int(remaining[0]["number"]))
+        first = chapters[0].number if chapters else None
+        last = chapters[-1].number if chapters else None
+        unresolved = [number for number in resume_candidates if number not in previously_completed]
+        suggested_start = min(unresolved) if unresolved else first
+        result["suggested_chapter_start"] = suggested_start
+        suggested_end = capped_chapter_end((chapter.number for chapter in chapters), suggested_start) if suggested_start is not None else None
+        result["suggested_chapter_end"] = suggested_end if suggested_end is not None else last
+        return result
+    except (ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        for item in files:
+            await item.close()
+
+
+@app.post("/api/book-jobs", tags=["Audiobooks"])
+async def create_book_job(request: BookJobRequest):
+    try:
+        imported = book_store.read_import(request.import_id)
+        settings = request.model_dump(exclude={"import_id", "book_title", "selected_sections", "selected_chapters", "chapters_per_section", "merge_final_section", "requested_chapter_start", "requested_chapter_end"})
+        job = book_store.create_job(imported, request.book_title, request.selected_sections, settings, request.selected_chapters, request.chapters_per_section, request.merge_final_section, request.requested_chapter_start, request.requested_chapter_end)
+        book_runner.start(job["id"])
+        return job
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Book import was not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/book-jobs", tags=["Audiobooks"])
+async def list_book_jobs():
+    return book_store.list_jobs()
+
+
+@app.get("/api/book-jobs/{job_id}", tags=["Audiobooks"])
+async def get_book_job(job_id: str):
+    try:
+        return book_store.read_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Book job was not found.") from exc
+
+
+@app.post("/api/book-jobs/{job_id}/{action}", tags=["Audiobooks"])
+async def control_book_job(job_id: str, action: Literal["pause", "resume", "retry-failed", "cancel"]):
+    try:
+        return book_runner.control(job_id, action)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Book job was not found.") from exc
 
 
 # --- Configuration Management API Endpoints ---
@@ -659,33 +876,9 @@ async def custom_tts_endpoint(
     )
     logger.debug(f"Input text (first 100 chars): '{request.text[:100]}...'")
 
-    # Sanitize text to remove problematic Unicode characters that cause tokenizer errors
-    import re
-    text = request.text
-    # Ensure text is a string (handle bytes/None/other types safely)
-    if isinstance(text, bytes):
-        text = text.decode('utf-8', errors='replace')
-    elif text is None:
-        text = ''
-    elif not isinstance(text, str):
-        text = str(text)
-    text = re.sub(
-    r'(?m)^\s*[-\u2010-\u2015\u2013\u2014]+\s*$',
-    '...',
-    text
-    )
-    original_len = len(text)
-    # Remove special Unicode dashes, quotes, and other problematic characters
-    text = re.sub(r'[\u2010-\u2015\u2018\u2019\u201c\u201d]', lambda m: {
-        '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2013': '-', '\u2014': '-', '\u2015': '-',
-        '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"'
-    }.get(m.group(), m.group()), text)  # Convert smart quotes and dashes to ASCII
-    text = re.sub(r'\s*\*\s*\*\s*\*.*?$', '', text, flags=re.MULTILINE)  # Remove ***
-    text = re.sub(r'\[TL[^\]]*\]', '', text)  # Remove [TL Notes: ...]
-    text = re.sub(r'[\[\]]', '', text)  # Remove all brackets
-    text = re.sub(r'\*', '', text)  # Remove asterisks
-    text = re.sub(r'_', ' ', text)  # Convert underscores to spaces
-    text = re.sub(r'[\u4e00-\u9fff]', '', text)  # Remove Chinese characters
+    # Apply tokenizer-safety cleanup before deciding how to split the request.
+    original_len = len(request.text)
+    text = sanitize_text_for_tokenizer(request.text)
     # Remove leading/trailing dashes and other problematic punctuation
     text = re.sub(r'^[\s\-\–\u2013]+', '', text)  # Remove leading dashes/spaces
     if len(text) != original_len:
@@ -958,10 +1151,13 @@ async def custom_tts_endpoint(
 
     media_type = f"audio/{output_format_str}"
     timestamp_str = time.strftime("%Y%m%d_%H%M%S")
-    suggested_filename_base = f"tts_output_{timestamp_str}"
-    download_filename = utils.sanitize_filename(
-        f"{suggested_filename_base}.{output_format_str}"
-    )
+    if request.book_title and request.chapter_start is not None and request.chapter_end is not None:
+        if request.chapter_end < request.chapter_start:
+            raise HTTPException(status_code=400, detail="chapter_end must not be less than chapter_start.")
+        download_filename = chapter_filename(request.book_title, request.chapter_start, request.chapter_end, output_format_str)
+    else:
+        suggested_filename_base = f"tts_output_{timestamp_str}"
+        download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
     headers = {"Content-Disposition": f'attachment; filename="{download_filename}"'}
 
     logger.info(
@@ -980,10 +1176,9 @@ async def custom_tts_endpoint(
         # Trigger saving when size is greater than or equal to the threshold
         if encoded_len >= large_file_threshold_bytes:
             outputs_dir = get_output_path(ensure_absolute=True)
-            outputs_dir.mkdir(parents=True, exist_ok=True)
-            out_path = outputs_dir / download_filename
-            with open(out_path, "wb") as f_out:
-                f_out.write(encoded_audio_bytes)
+            download_filename, out_path = _write_unique_output_file(
+                outputs_dir, download_filename, encoded_audio_bytes
+            )
             logger.info(
                 f"Large generated audio saved to outputs: {out_path} ({len(encoded_audio_bytes)} bytes). Returning download URL."
             )
@@ -1172,24 +1367,26 @@ async def _process_single_tts_request(
         # Sanitize the words to be filename-safe
         first_two_words = utils.sanitize_filename(first_two_words)
         
-        # Build filename with format: output_<batch_number>_<random_hex>_<first_2_words>
-        if batch_item_number is not None:
+        # Chapter metadata opts into stable, human-readable audiobook naming.
+        if request_obj.book_title and request_obj.chapter_start is not None and request_obj.chapter_end is not None:
+            if request_obj.chapter_end < request_obj.chapter_start:
+                raise ValueError("chapter_end must not be less than chapter_start.")
+            download_filename = chapter_filename(request_obj.book_title, request_obj.chapter_start, request_obj.chapter_end, output_format_str)
+        elif batch_item_number is not None:
             suggested_filename_base = f"output_{batch_item_number}_{random_hex}_{first_two_words}"
+            download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
         else:
             suggested_filename_base = f"tts_output_{timestamp_str}_{random_hex}"
-        
-        download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
-        out_path = outputs_dir / download_filename
-
+            download_filename = utils.sanitize_filename(f"{suggested_filename_base}.{output_format_str}")
         encoded_len = len(encoded_audio_bytes)
         large_file_threshold_mb = config_manager.get_int("server.large_file_threshold_mb", 10)
         large_file_threshold_bytes = int(large_file_threshold_mb) * 1024 * 1024
 
         # Save if forced or if over threshold
         if force_save or encoded_len >= large_file_threshold_bytes:
-            outputs_dir.mkdir(parents=True, exist_ok=True)
-            with open(out_path, "wb") as f_out:
-                f_out.write(encoded_audio_bytes)
+            download_filename, out_path = _write_unique_output_file(
+                outputs_dir, download_filename, encoded_audio_bytes
+            )
             logger.info(f"Saved generated audio to outputs: {out_path} ({encoded_len} bytes)")
 
             result = {

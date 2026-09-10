@@ -2315,3 +2315,64 @@ input[type="range"].slider-base::-moz-range-thumb {
     border-color: #64748b;
     /* hover:border-slate-500 */
 }
+dialog::backdrop {
+  background: rgba(15, 23, 42, 0.72);
+}
+
+/* A direct class instead of a generated utility keeps the drag feedback
+   available in production builds and makes the whole drop target obvious. */
+#book-drop-zone {
+    transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+#book-drop-zone.book-drop-active {
+    border-color: #6366f1;
+    background: rgba(99, 102, 241, 0.10);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.20);
+}
+
+#book-drop-zone.book-drop-ready {
+    border-color: #10b981;
+}
+
+.dark #book-drop-zone.book-drop-active {
+    background: rgba(129, 140, 248, 0.16);
+}
+
+/* Book previews can contain hundreds of chapter controls. Keep one native
+   scroll container: the dialog itself. This avoids nested overflow areas that
+   can prevent the lower controls from being reached. */
+#book-preview-modal {
+    box-sizing: border-box;
+    width: min(91vw, 64rem);
+    height: 90vh;
+    max-height: 90vh;
+    height: min(90dvh, 56rem);
+    max-height: 90dvh;
+    margin: auto;
+    padding: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.book-preview-modal-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem;
+    border-bottom: 1px solid #e2e8f0;
+    background: #ffffff;
+}
+
+.book-preview-modal-content {
+    padding: 1.25rem;
+}
+
+.dark .book-preview-modal-header {
+    border-color: #475569;
+    background: #1e293b;
+}

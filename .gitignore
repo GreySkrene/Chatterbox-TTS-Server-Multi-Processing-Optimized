@@ -52,5 +52,7 @@ logs/
 # Ignore generated debugging artifacts (tools and documentation stay tracked)
 debugging/last_attempt.txt
 debugging/problematic_chunks_debug.txt
+problematic_chunks_debug.txt
 debugging/problem_chunk_*.txt
 debugging/temp.txt
+runtime/

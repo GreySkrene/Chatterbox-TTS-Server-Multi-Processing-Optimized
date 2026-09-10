@@ -62,8 +62,12 @@ class CustomTTSRequest(BaseModel):
     )
 
     output_format: Optional[Literal["wav", "opus", "mp3"]] = Field(  # Added "mp3"
-        "wav", description="Desired audio output format."  # Default output format
+        "mp3", description="Desired audio output format."  # Default output format
     )
+
+    book_title: Optional[str] = Field(None, max_length=300, description="Optional title used for chapter-aware output naming.")
+    chapter_start: Optional[int] = Field(None, ge=0)
+    chapter_end: Optional[int] = Field(None, ge=0)
 
     split_text: Optional[bool] = Field(
         True,  # Default to splitting enabled
