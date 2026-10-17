@@ -37,6 +37,14 @@ Audiobook work is split into named output groups and persisted locally. Active a
 
 ![Audiobook queue with current and previous jobs](docs/screenshots/audiobook-queue.png)
 
+### Select exact audiobook chapters
+
+The chapter picker supports individual chapters, whole groups, and explicit ranges. Its automatic ending chapter is capped at 600 detected chapters from the selected start.
+
+For very large books, keep each generation job at 600 chapters or fewer. A 600-chapter job can take around three days on the hardware and settings used for this project, so treat that as a practical planning estimate rather than a guaranteed runtime.
+
+![Select audiobook chapters and ranges](docs/screenshots/audiobook-chapter-selection.png)
+
 ### Video / Kdenlive workflow
 
 The optional Video workspace scans audiobook audio and cover art, creates editable Kdenlive projects, and can hand render jobs to the included Windows helper.
@@ -210,6 +218,8 @@ A fixed reference voice and seed can improve consistency across related outputs.
 3. Inspect parser warnings and select exact chapters, groups, or a chapter range.
 4. Review the planned output filenames.
 5. Start the job and use its card to pause, resume, retry failures, or cancel.
+
+The default automatic range selects at most 600 detected chapters from the chosen starting chapter. For long books, 600 chapters is also the recommended maximum per generation job; on the project author's setup, that amount can take roughly three days to finish.
 
 Completed groups remain available after an interruption, and unfinished work can be resumed. Audiobook jobs currently write MP3 output and store their local state under `runtime/`.
 
