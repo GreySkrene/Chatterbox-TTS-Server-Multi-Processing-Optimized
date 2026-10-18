@@ -1,4 +1,4 @@
-# Chatterbox TTS Server
+# Chatterbox TTS Long-Form Optimized Server
 
 Self-hosted text-to-speech, voice cloning, long-form audiobook generation, and optional Kdenlive video export—available through a browser UI and FastAPI endpoints.
 
